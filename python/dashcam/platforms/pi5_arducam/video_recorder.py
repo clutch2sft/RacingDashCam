@@ -58,6 +58,8 @@ class CameraRecorder:
         self.latest_frame = None
         self.frame_lock = Lock()
         self.frame_count = 0
+        # Whether the camera transform was applied in hardware (libcamera)
+        self.hardware_transform_applied = False
 
     def init_camera(self) -> bool:
         """Initialize this CSI camera"""
@@ -97,17 +99,53 @@ class CameraRecorder:
                     }
                 )
 
-            # Apply camera-specific transformations
-            if self.camera_config.get('hflip'):
-                camera_config["transform"].hflip = True
-            if self.camera_config.get('vflip'):
-                camera_config["transform"].vflip = True
-            
-            rotation = self.camera_config.get('rotation', 0)
-            if rotation:
-                camera_config["transform"].rotation = rotation
+            # Apply camera-specific transformations.
+            # Picamera2 expects camera_config['transform'] to be a libcamera Transform
+            # object (or an object with hflip/vflip/rotation attributes). Create a
+            # Transform when libcamera is available, otherwise attempt to set
+            # attributes on any existing transform object.
+            try:
+                # Build transform values from our camera_config dict
+                hflip_val = bool(self.camera_config.get('hflip', False))
+                vflip_val = bool(self.camera_config.get('vflip', False))
+                rotation_val = int(self.camera_config.get('rotation', 0) or 0) % 360
 
-            self.logger.debug("Configuring camera...")
+                # Try to import libcamera Transform (only on systems with libcamera)
+                try:
+                    from libcamera import Transform as LibTransform  # type: ignore
+                    transform_obj = LibTransform(hflip=int(hflip_val), vflip=int(vflip_val), rotation=rotation_val)
+                    camera_config['transform'] = transform_obj
+                    # mark that we applied the transform in hardware
+                    self.hardware_transform_applied = True
+                except Exception:
+                    # If libcamera isn't available or construction failed, try
+                    # to set attributes on an existing transform object if present
+                    try:
+                        existing = camera_config.get('transform') if isinstance(camera_config, dict) else None
+                    except Exception:
+                        existing = None
+
+                    if existing is not None:
+                        # Some CameraConfiguration implementations expose a transform
+                        # object; set attributes if possible
+                        try:
+                            if hasattr(existing, 'hflip'):
+                                setattr(existing, 'hflip', bool(hflip_val))
+                            if hasattr(existing, 'vflip'):
+                                setattr(existing, 'vflip', bool(vflip_val))
+                            if hasattr(existing, 'rotation'):
+                                setattr(existing, 'rotation', int(rotation_val))
+                            camera_config['transform'] = existing
+                            # if we could set attributes on the existing transform, treat as applied
+                            self.hardware_transform_applied = True
+                        except Exception:
+                            # As a last resort, log and continue without transform
+                            self.logger.debug("Could not apply camera transform on this platform")
+
+            except Exception as e:
+                self.logger.debug(f"Transform setup skipped: {e}")
+
+            self.logger.debug(f"Configuring camera... hardware_transform_applied={self.hardware_transform_applied}")
             self.camera.configure(camera_config)
 
             # Set camera controls if needed
@@ -343,6 +381,18 @@ class VideoRecorder:
                 return False
 
             self.logger.info(f"Display camera set to: camera {self.display_camera.camera_index}")
+
+            # Inform the display whether the camera applied transforms in hardware
+            try:
+                hw_applied = getattr(self.display_camera, 'hardware_transform_applied', False)
+                if self.display:
+                    try:
+                        # call display API if available
+                        self.display.set_hardware_transform_applied(hw_applied)
+                    except Exception:
+                        self.logger.debug("Display does not support hardware transform notification")
+            except Exception:
+                pass
 
             # Start threads
             self.running = True
