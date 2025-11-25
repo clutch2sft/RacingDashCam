@@ -15,10 +15,12 @@ from datetime import datetime
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import config
-from video_display import VideoDisplay
-from video_recorder import VideoRecorder
-from gps_handler import GPSHandler
+# Use package-qualified imports so the script works when executed
+# from the `python/` directory or via systemd with the repo mounted
+from dashcam.core.config import config
+from dashcam.platforms.pi5_arducam.video_display import VideoDisplay
+from dashcam.platforms.pi5_arducam.video_recorder import VideoRecorder
+from dashcam.core.gps_handler import GPSHandler
 
 
 class DashcamSystem:
