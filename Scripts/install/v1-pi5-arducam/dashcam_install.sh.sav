@@ -8,7 +8,6 @@
 # - Dual Arducam HQ camera setup (both IMX477)
 # - Low-latency camera display
 # - GPS integration
-# - CAN bus integration
 # - Auto-start on boot
 #
 # Hardware:
@@ -17,10 +16,7 @@
 #
 # Usage: 
 #   chmod +x dashcam_install.sh
-#   sudo ./dashcam_install.sh [github-repo-url]
-#
-# Example:
-#   sudo ./dashcam_install.sh https://github.com/yourusername/RacingDashCam.git
+#   sudo ./dashcam_install.sh
 #
 
 set -e  # Exit on any error
@@ -33,14 +29,10 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-REPO_URL="${1:-}"
-INSTALL_BASE="/opt/dashcam"
-REPO_DIR="$INSTALL_BASE/RacingDashCam"
-VIDEO_BASE="/var/opt/dashcam"
-VIDEO_DIR="$VIDEO_BASE/videos"
-LOG_DIR="$VIDEO_BASE/logs"
-CONFIG_DIR="/etc/dashcam"
-VENV_DIR="$INSTALL_BASE/venv"
+INSTALL_DIR="/home/$SUDO_USER/dashcam"
+VIDEO_DIR="/dashcam/videos"
+LOG_DIR="/dashcam/logs"
+VENV_DIR="$INSTALL_DIR/venv"
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}  Active Dash Mirror Installation${NC}"
@@ -52,21 +44,6 @@ echo ""
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then 
     echo -e "${RED}ERROR: Please run as root (sudo)${NC}"
-    exit 1
-fi
-
-# Check for repository URL
-if [ -z "$REPO_URL" ]; then
-    echo -e "${RED}ERROR: GitHub repository URL required${NC}"
-    echo ""
-    echo "Usage: sudo $0 <github-repo-url>"
-    echo "Example: sudo $0 https://github.com/yourusername/RacingDashCam.git"
-    exit 1
-fi
-
-# Validate we have a real user (not just root)
-if [ -z "$SUDO_USER" ]; then
-    echo -e "${RED}ERROR: Must be run with sudo, not as root directly${NC}"
     exit 1
 fi
 
@@ -218,143 +195,41 @@ echo -e "${GREEN}✓ System packages installed${NC}"
 echo ""
 echo -e "${GREEN}Step 5: Creating directory structure...${NC}"
 
-# Create application directories
-mkdir -p "$INSTALL_BASE"
-mkdir -p "$CONFIG_DIR"
-
-# Create data directories
+# Create application and data directories
+mkdir -p "$INSTALL_DIR"
 mkdir -p "$VIDEO_DIR/current"
 mkdir -p "$VIDEO_DIR/archive"
 mkdir -p "$LOG_DIR"
 
-# Set ownership for data directories
-chown -R $SUDO_USER:$SUDO_USER "$VIDEO_BASE"
+# Set ownership
+chown -R $SUDO_USER:$SUDO_USER "$INSTALL_DIR"
+chown -R $SUDO_USER:$SUDO_USER /dashcam
 
 echo -e "${GREEN}✓ Directories created${NC}"
-echo "  Install: $INSTALL_BASE"
-echo "  Config:  $CONFIG_DIR"
+echo "  Install: $INSTALL_DIR"
 echo "  Videos:  $VIDEO_DIR"
 echo "  Logs:    $LOG_DIR"
 
 echo ""
-echo -e "${GREEN}Step 6: Cloning repository from GitHub...${NC}"
-
-if [ -d "$REPO_DIR" ]; then
-    echo -e "${YELLOW}Repository already exists, pulling latest changes...${NC}"
-    cd "$REPO_DIR"
-    git pull
-else
-    echo -e "${BLUE}Cloning $REPO_URL...${NC}"
-    git clone "$REPO_URL" "$REPO_DIR"
-fi
-
-# Set ownership
-chown -R $SUDO_USER:$SUDO_USER "$REPO_DIR"
-
-echo -e "${GREEN}✓ Repository cloned/updated${NC}"
-echo "  Location: $REPO_DIR"
-
-echo ""
-echo -e "${GREEN}Step 7: Setting up Python virtual environment...${NC}"
+echo -e "${GREEN}Step 6: Setting up Python virtual environment...${NC}"
 
 # Create venv with system-site-packages for Picamera2 access
-python3 -m venv --system-site-packages "$VENV_DIR"
+su - $SUDO_USER -c "python3 -m venv --system-site-packages $VENV_DIR"
 
 # Install Python packages in venv
 echo -e "${BLUE}Installing Python packages in virtual environment...${NC}"
-"$VENV_DIR/bin/pip" install --upgrade pip
-
-# Install the dashcam package in development mode
-cd "$REPO_DIR/python"
-"$VENV_DIR/bin/pip" install -e .
-
-# Install additional dependencies
-"$VENV_DIR/bin/pip" install \
+su - $SUDO_USER -c "$VENV_DIR/bin/pip install --upgrade pip"
+su - $SUDO_USER -c "$VENV_DIR/bin/pip install \
     pillow \
     gps \
     pyserial \
     pyyaml \
-    python-can
+    python-can"
 
 # Note: Picamera2, numpy, opencv accessed from system packages
 
 echo -e "${GREEN}✓ Virtual environment created and packages installed${NC}"
 echo "  Location: $VENV_DIR"
-
-echo ""
-echo -e "${GREEN}Step 8: Creating default configuration...${NC}"
-
-# Create a default config file if it doesn't exist
-if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
-    cat > "$CONFIG_DIR/config.yaml" << 'EOF'
-# Active Dash Mirror Configuration
-# Edit this file to customize your setup
-
-# Video settings
-video:
-  # Directory for video recordings
-  output_dir: /var/opt/dashcam/videos/current
-  
-  # Archive directory for processed videos
-  archive_dir: /var/opt/dashcam/videos/archive
-  
-  # Resolution for front camera (CAM0)
-  front_resolution: [1920, 1080]
-  
-  # Resolution for rear camera (CAM1) 
-  rear_resolution: [1920, 1080]
-  
-  # Frame rate
-  framerate: 30
-  
-  # Video segment duration in seconds
-  segment_duration: 60
-  
-  # Keep last N segments (rolling buffer)
-  keep_segments: 10
-
-# Display settings
-display:
-  # Main display resolution
-  resolution: [1920, 1080]
-  
-  # Show rear camera as picture-in-picture
-  pip_enabled: true
-  
-  # PIP size and position (x, y, width, height)
-  pip_rect: [1520, 20, 380, 214]
-  
-  # Show overlay info (speed, GPS, etc)
-  overlay_enabled: true
-
-# GPS settings
-gps:
-  enabled: true
-  device: /dev/serial0
-
-# CAN bus settings
-canbus:
-  enabled: true
-  # Vehicle profile to use (see dashcam/canbus/vehicles/)
-  vehicle: camaro_2013_lfx
-  # CAN interfaces
-  interfaces:
-    - can0
-    - can1
-
-# Logging
-logging:
-  level: INFO
-  dir: /var/opt/dashcam/logs
-EOF
-
-    chown $SUDO_USER:$SUDO_USER "$CONFIG_DIR/config.yaml"
-    echo -e "${GREEN}✓ Default configuration created${NC}"
-else
-    echo -e "${GREEN}✓ Configuration file already exists${NC}"
-fi
-
-echo "  Config file: $CONFIG_DIR/config.yaml"
 
 echo ""
 echo -e "${BLUE}Camera Configuration:${NC}"
@@ -366,7 +241,7 @@ echo "  rpicam-hello --list-cameras"
 echo ""
 
 echo ""
-echo -e "${GREEN}Step 9: Configuring GPS (GPSD)...${NC}"
+echo -e "${GREEN}Step 7: Configuring GPS (GPSD)...${NC}"
 
 # Configure GPSD for LC29H module
 cat > /etc/default/gpsd << 'EOF'
@@ -397,7 +272,7 @@ systemctl enable gpsd.socket
 echo -e "${GREEN}✓ GPSD configured${NC}"
 
 echo ""
-echo -e "${GREEN}Step 10: Configuring CAN bus...${NC}"
+echo -e "${GREEN}Step 8: Configuring CAN bus...${NC}"
 
 # Create systemd service to bring up CAN interfaces on boot
 cat > /etc/systemd/system/can-setup.service << 'EOF'
@@ -440,22 +315,21 @@ echo -e "${GREEN}✓ CAN bus configured${NC}"
 echo "  CAN0 and CAN1 will be configured at boot (500 kbps)"
 
 echo ""
-echo -e "${GREEN}Step 11: Creating systemd service...${NC}"
+echo -e "${GREEN}Step 9: Creating systemd service...${NC}"
 
 cat > /etc/systemd/system/dashcam.service << EOF
 [Unit]
 Description=Active Dash Mirror - Dual CSI Camera System
-After=network.target graphical.target gpsd.service can-setup.service
-Wants=gpsd.service can-setup.service
+After=network.target graphical.target gpsd.service
+Wants=gpsd.service
 
 [Service]
 Type=simple
 User=$SUDO_USER
-WorkingDirectory=$REPO_DIR/python
+WorkingDirectory=$INSTALL_DIR
 Environment="PYTHONUNBUFFERED=1"
 Environment="LIBCAMERA_LOG_LEVELS=*:ERROR"
-Environment="DASHCAM_CONFIG=$CONFIG_DIR/config.yaml"
-ExecStart=$VENV_DIR/bin/python dashcam.py
+ExecStart=$VENV_DIR/bin/python $INSTALL_DIR/dashcam.py
 Restart=always
 RestartSec=5
 
@@ -473,7 +347,7 @@ systemctl enable dashcam.service
 echo -e "${GREEN}✓ Systemd service created and enabled${NC}"
 
 echo ""
-echo -e "${GREEN}Step 12: Disabling screen blanking...${NC}"
+echo -e "${GREEN}Step 10: Disabling screen blanking...${NC}"
 
 # Add to rc.local
 if [ ! -f /etc/rc.local ]; then
@@ -495,7 +369,7 @@ fi
 echo -e "${GREEN}✓ Screen blanking disabled${NC}"
 
 echo ""
-echo -e "${GREEN}Step 13: Configuring framebuffer permissions...${NC}"
+echo -e "${GREEN}Step 11: Configuring framebuffer permissions...${NC}"
 
 # Add user to video group for framebuffer access
 usermod -a -G video $SUDO_USER
@@ -506,7 +380,7 @@ if [ -e /dev/fb0 ]; then
     chmod 666 /dev/fb0
     echo -e "${GREEN}✓ Framebuffer permissions set${NC}"
 else
-    echo -e "${YELLOW}⚠  Framebuffer not found (will be available after reboot)${NC}"
+    echo -e "${YELLOW}⚠ Framebuffer not found (will be available after reboot)${NC}"
 fi
 
 # Create udev rule for persistent framebuffer permissions
@@ -518,7 +392,7 @@ EOF
 echo -e "${GREEN}✓ Framebuffer udev rule created${NC}"
 
 echo ""
-echo -e "${GREEN}Step 14: Setting boot order for NVMe...${NC}"
+echo -e "${GREEN}Step 12: Setting boot order for NVMe...${NC}"
 
 # Set boot order to try NVMe first
 BOOT_CONFIG="/tmp/bootloader_config.txt"
@@ -535,10 +409,9 @@ fi
 rm -f "$BOOT_CONFIG"
 
 echo ""
-echo -e "${GREEN}Step 15: Creating convenience scripts...${NC}"
+echo -e "${GREEN}Step 13: Creating camera test script...${NC}"
 
-# Camera test script
-cat > /usr/local/bin/dashcam-test-cameras << 'TESTEOF'
+cat > "$INSTALL_DIR/test_cameras.sh" << 'TESTEOF'
 #!/bin/bash
 # Camera test script for dual CSI setup
 
@@ -566,88 +439,10 @@ echo ""
 echo "Test complete!"
 TESTEOF
 
-chmod +x /usr/local/bin/dashcam-test-cameras
+chmod +x "$INSTALL_DIR/test_cameras.sh"
+chown $SUDO_USER:$SUDO_USER "$INSTALL_DIR/test_cameras.sh"
 
-# Repository update script
-cat > /usr/local/bin/dashcam-update << UPDATEEOF
-#!/bin/bash
-# Update dashcam software from GitHub
-
-set -e
-
-echo "Updating dashcam software..."
-
-# Stop service if running
-echo "Stopping dashcam service..."
-sudo systemctl stop dashcam || true
-
-# Pull latest changes
-echo "Pulling latest changes from GitHub..."
-cd $REPO_DIR
-sudo -u $SUDO_USER git pull
-
-# Update Python dependencies
-echo "Updating Python dependencies..."
-cd $REPO_DIR/python
-$VENV_DIR/bin/pip install -e . --upgrade
-
-# Reload systemd
-echo "Reloading systemd..."
-sudo systemctl daemon-reload
-
-# Start service
-echo "Starting dashcam service..."
-sudo systemctl start dashcam
-
-echo "Update complete!"
-echo ""
-echo "Check status with: sudo systemctl status dashcam"
-echo "View logs with: journalctl -u dashcam -f"
-UPDATEEOF
-
-chmod +x /usr/local/bin/dashcam-update
-
-# Status script
-cat > /usr/local/bin/dashcam-status << 'STATUSEOF'
-#!/bin/bash
-# Show dashcam system status
-
-echo "=========================================="
-echo "  Dashcam System Status"
-echo "=========================================="
-echo ""
-
-echo "Service Status:"
-systemctl status dashcam --no-pager || true
-echo ""
-
-echo "Cameras:"
-rpicam-hello --list-cameras 2>&1 | head -20
-echo ""
-
-echo "GPS Status:"
-timeout 2 gpspipe -w -n 5 2>/dev/null || echo "GPS not responding"
-echo ""
-
-echo "CAN Bus:"
-ip link show can0 2>/dev/null || echo "CAN0 not configured"
-ip link show can1 2>/dev/null || echo "CAN1 not configured"
-echo ""
-
-echo "Disk Usage:"
-df -h /var/opt/dashcam
-echo ""
-
-echo "Recent Log Entries:"
-journalctl -u dashcam -n 20 --no-pager
-STATUSEOF
-
-chmod +x /usr/local/bin/dashcam-status
-
-echo -e "${GREEN}✓ Convenience scripts created${NC}"
-echo "  dashcam-test-cameras - Test camera functionality"
-echo "  dashcam-update       - Update software from GitHub"
-echo "  dashcam-status       - Show system status"
+echo -e "${GREEN}✓ Camera test script created: $INSTALL_DIR/test_cameras.sh${NC}"
 
 echo ""
 echo -e "${BLUE}========================================${NC}"
@@ -666,53 +461,39 @@ echo "  ✓ GPU memory set to 256MB for dual cameras"
 echo "  ✓ CMA memory set to 512MB for video buffers"
 echo "  ✓ GPS configured (LC29H on serial port)"
 echo "  ✓ CAN bus configured (Waveshare 2-CH CAN HAT)"
-echo "  ✓ Repository cloned: $REPO_DIR"
 echo "  ✓ Python virtual environment: $VENV_DIR"
-echo "  ✓ Configuration: $CONFIG_DIR/config.yaml"
 echo "  ✓ Video directory: $VIDEO_DIR"
 echo "  ✓ Auto-start service configured"
-echo ""
-echo "Directory Structure:"
-echo "  /opt/dashcam/           - Application installation"
-echo "    ├── RacingDashCam/    - Git repository"
-echo "    └── venv/             - Python virtual environment"
-echo "  /etc/dashcam/           - Configuration files"
-echo "    └── config.yaml       - Main config (edit this!)"
-echo "  /var/opt/dashcam/       - Runtime data"
-echo "    ├── videos/           - Video recordings"
-echo "    └── logs/             - Application logs"
 echo ""
 echo "Next steps:"
 echo "  1. REBOOT: sudo reboot"
 echo ""
 echo "  2. After reboot, test cameras:"
-echo "     dashcam-test-cameras"
+echo "     $INSTALL_DIR/test_cameras.sh"
+echo "     OR manually:"
+echo "     rpicam-hello --list-cameras"
+echo "     rpicam-hello --camera 0  # Test front camera"
+echo "     rpicam-hello --camera 1  # Test rear camera"
 echo ""
-echo "  3. Check system status:"
-echo "     dashcam-status"
+echo "  3. Check GPS:"
+echo "     cgps -s"
+echo "     gpsmon"
 echo ""
-echo "  4. Edit configuration:"
-echo "     sudo nano $CONFIG_DIR/config.yaml"
+echo "  4. Check CAN bus:"
+echo "     ip link show can0"
+echo "     ip link show can1"
+echo "     candump can0  # Monitor CAN traffic"
 echo ""
 echo "  5. Service management:"
 echo "     sudo systemctl start dashcam   # Start"
 echo "     sudo systemctl stop dashcam    # Stop"
 echo "     sudo systemctl status dashcam  # Check status"
-echo "     sudo systemctl restart dashcam # Restart"
 echo "     journalctl -u dashcam -f       # View logs"
-echo ""
-echo "  6. Update software:"
-echo "     dashcam-update"
 echo ""
 echo -e "${YELLOW}Hardware reminder:${NC}"
 echo "  - Connect front Arducam HQ to CAM0 (port closer to USB-C)"
 echo "  - Connect rear Arducam HQ to CAM1 (port closer to HDMI)"
 echo "  - Both cameras should have proper FFC cable connections"
-echo ""
-echo -e "${YELLOW}Configuration:${NC}"
-echo "  - Edit $CONFIG_DIR/config.yaml to customize settings"
-echo "  - Default vehicle profile: Camaro 2013 LFX"
-echo "  - See Docs/CANBUS_GUIDE.md for vehicle-specific setup"
 echo ""
 read -p "Reboot now? (y/n) " -n 1 -r
 echo
