@@ -187,7 +187,7 @@ class Config:
         # ==========================================
         # Logging Configuration
         # ==========================================
-        self.log_level = "INFO"  # DEBUG, INFO, WARNING, ERROR
+        self.log_level = "DEBUG"  # DEBUG, INFO, WARNING, ERROR
         self.log_max_size = 10 * 1024 * 1024  # 10MB
         self.log_backup_count = 5
         self.log_to_console = True  # Also log to console

@@ -230,6 +230,13 @@ mkdir -p "$LOG_DIR"
 # Set ownership for data directories
 chown -R $SUDO_USER:$SUDO_USER "$VIDEO_BASE"
 
+# Also create legacy/compat paths under the install base so services
+# that expect /opt/dashcam/videos and /opt/dashcam/logs will work.
+mkdir -p "$INSTALL_BASE/videos/current"
+mkdir -p "$INSTALL_BASE/videos/archive"
+mkdir -p "$INSTALL_BASE/logs"
+chown -R $SUDO_USER:$SUDO_USER "$INSTALL_BASE"
+
 echo -e "${GREEN}✓ Directories created${NC}"
 echo "  Install: $INSTALL_BASE"
 echo "  Config:  $CONFIG_DIR"
