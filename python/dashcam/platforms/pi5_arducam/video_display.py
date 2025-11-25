@@ -316,7 +316,8 @@ class VideoDisplay:
                         avg_overlay = self._prof_overlay_render / max(1, self._prof_frames)
                         avg_blend = self._prof_blend / max(1, self._prof_frames)
                         avg_write = self._prof_write / max(1, self._prof_frames)
-                        avg_other = max(0.0, (interval*1000.0) - (avg_transform + avg_overlay + avg_blend + avg_write))
+                        # avg_other should be per-frame remainder: total ms per frame
+                        avg_other = max(0.0, (interval * 1000.0) / max(1, frames) - (avg_transform + avg_overlay + avg_blend + avg_write))
                     else:
                         avg_transform = avg_overlay = avg_blend = avg_write = avg_other = 0.0
 
@@ -426,30 +427,50 @@ class VideoDisplay:
             except Exception:
                 return frame
 
-        # Perform integer alpha blend using uint16 intermediates to avoid
-        # costly float32 allocations. out = (a*o + (255-a)*f) / 255
+        # Fast path: compute bounding box of non-zero alpha in overlay and
+        # blend only that rectangle. Most overlays are small (time, date,
+        # REC) so this drastically reduces computation.
         try:
-            o_rgb = overlay_rgba[:, :, :3].astype(np.uint16)
-            o_a = overlay_rgba[:, :, 3].astype(np.uint16)
+            alpha = overlay_rgba[:, :, 3]
+            # If completely transparent, nothing to do
+            if not np.any(alpha):
+                return frame
 
-            f_rgb = frame.astype(np.uint16)
+            ys, xs = np.where(alpha > 0)
+            y0, y1 = ys.min(), ys.max()
+            x0, x1 = xs.min(), xs.max()
 
-            # Broadcast alpha to three channels and compute in uint32 to avoid overflow
+            # Extract subregions
+            o_sub = overlay_rgba[y0:y1+1, x0:x1+1]
+            f_sub = frame[y0:y1+1, x0:x1+1]
+
+            # Convert to small uint16/uint32 intermediates for integer blend
+            o_rgb = o_sub[:, :, :3].astype(np.uint16)
+            o_a = o_sub[:, :, 3].astype(np.uint16)
+            f_rgb = f_sub.astype(np.uint16)
+
             a_exp = o_a[:, :, None].astype(np.uint32)
             o_exp = o_rgb.astype(np.uint32)
             f_exp = f_rgb.astype(np.uint32)
 
-            out = (a_exp * o_exp + (255 - a_exp) * f_exp + 127) // 255
-            out = np.clip(out, 0, 255).astype(np.uint8)
-            return out
+            out_sub = (a_exp * o_exp + (255 - a_exp) * f_exp + 127) // 255
+            out_sub = np.clip(out_sub, 0, 255).astype(np.uint8)
+
+            # Write back blended subregion
+            frame[y0:y1+1, x0:x1+1] = out_sub
+            return frame
+
         except Exception:
-            # Fallback to previous float-based blend on error
-            o_rgb = overlay_rgba[:, :, :3].astype(np.float32)
-            o_a = overlay_rgba[:, :, 3:].astype(np.float32) / 255.0
-            f_rgb = frame.astype(np.float32)
-            out = (o_a * o_rgb) + ((1.0 - o_a) * f_rgb)
-            out = np.clip(out, 0, 255).astype(np.uint8)
-            return out
+            # Fallback to full-frame float blend if anything goes wrong
+            try:
+                o_rgb = overlay_rgba[:, :, :3].astype(np.float32)
+                o_a = overlay_rgba[:, :, 3:].astype(np.float32) / 255.0
+                f_rgb = frame.astype(np.float32)
+                out = (o_a * o_rgb) + ((1.0 - o_a) * f_rgb)
+                out = np.clip(out, 0, 255).astype(np.uint8)
+                return out
+            except Exception:
+                return frame
     
     def _draw_text_with_bg(self, draw: ImageDraw.Draw, text: str, pos: tuple, 
                            color: tuple, font: ImageFont.ImageFont):
@@ -552,18 +573,23 @@ class VideoDisplay:
 
             self._rgb565[:, :] = ((r5 << 11) | (g6 << 5) | b5).astype(np.uint16)
 
-            # Convert to bytes and write
-            # Use tobytes() on uint16 array (native endianness) which is little-endian on most Pis
-            buf = self._rgb565.tobytes()
-            if self._fb_frame_bytes is None:
-                self._fb_frame_bytes = self.width * self.height * 2
-
-            if len(buf) != self._fb_frame_bytes:
-                buf = buf[: self._fb_frame_bytes]
-
-            self.fb_file.seek(0)
-            self.fb_file.write(buf)
-            self.fb_file.flush()
+            # Write through a memoryview to avoid creating a temporary bytes
+            # object from the array (reduces allocation and copy).
+            try:
+                mv = memoryview(self._rgb565)
+                self.fb_file.seek(0)
+                self.fb_file.write(mv)
+                self.fb_file.flush()
+            except Exception:
+                # Fallback to bytes if memoryview write not supported
+                buf = self._rgb565.tobytes()
+                if self._fb_frame_bytes is None:
+                    self._fb_frame_bytes = self.width * self.height * 2
+                if len(buf) != self._fb_frame_bytes:
+                    buf = buf[: self._fb_frame_bytes]
+                self.fb_file.seek(0)
+                self.fb_file.write(buf)
+                self.fb_file.flush()
 
         except Exception as e:
             self.logger.error(f"Failed to write frame: {e}")
