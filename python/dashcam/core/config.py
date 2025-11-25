@@ -12,11 +12,14 @@ class Config:
         # ==========================================
         # Directory Configuration
         # ==========================================
-        self.base_dir = "/home/pi/dashcam"
-        self.video_dir = "/dashcam/videos"
+        # Base directory can be overridden with the DASHCAM_BASE_DIR env var
+        self.base_dir = os.environ.get("DASHCAM_BASE_DIR", "/opt/dashcam")
+
+        # Video and log directories are located under the base directory
+        self.video_dir = os.path.join(self.base_dir, "videos")
         self.video_current_dir = os.path.join(self.video_dir, "current")
         self.video_archive_dir = os.path.join(self.video_dir, "archive")
-        self.log_dir = "/dashcam/logs"
+        self.log_dir = os.path.join(self.base_dir, "logs")
         
         # ==========================================
         # Camera Configuration - Dual CSI Setup
@@ -28,7 +31,7 @@ class Config:
         self.front_camera_width = 1920
         self.front_camera_height = 1080
         self.front_camera_fps = 15
-        self.front_camera_recording_enabled = True
+        self.front_camera_recording_enabled = False
         
         # Rear camera (Arducam HQ 12.3MP) - CSI CAM1 - Picamera2 index 1
         # Wide angle (158°) camera for rearview mirror display
@@ -37,20 +40,20 @@ class Config:
         self.rear_camera_width = 1920  # HQ camera can do 1920x1080
         self.rear_camera_height = 1080
         self.rear_camera_fps = 15  # Reduced default to 15fps for performance
-        self.rear_camera_recording_enabled = True  # Enable recording from rear
+        self.rear_camera_recording_enabled = False  # Enable recording from rear
         
         # Display configuration - shows rear camera on screen
         self.display_camera_index = 1  # Show rear camera (mirror view)
         
         # Camera-specific settings
         # Front Arducam HQ settings
-        self.front_camera_rotation = 0  # Adjust if camera is mounted rotated
+        self.front_camera_rotation = 180  # Adjust if camera is mounted rotated
         self.front_camera_hflip = False
         self.front_camera_vflip = False
         
         # Arducam HQ settings
-        self.rear_camera_rotation = 0  # Adjust if needed
-        self.rear_camera_hflip = False
+        self.rear_camera_rotation = 180  # Adjust if needed
+        self.rear_camera_hflip = True
         self.rear_camera_vflip = False
         
         # ==========================================
@@ -120,14 +123,14 @@ class Config:
         # ==========================================
         # GPS Configuration
         # ==========================================
-        self.gps_enabled = True  # Enable when GPS module is connected
+        self.gps_enabled = False  # Enable when GPS module is connected
         self.gps_device = "/dev/serial0"  # LC29H on UART
         self.gps_baudrate = 9600
         self.gps_timeout = 1.0
         self.gps_log_interval = 1.0  # Log GPS data every second
         
         # GPS display
-        self.display_speed = True  # Show speed on overlay
+        self.display_speed = False  # Show speed on overlay
         self.speed_unit = "mph"  # "mph" or "kph"
         
         # Speed-based recording (when GPS is enabled)
@@ -138,17 +141,17 @@ class Config:
         # ==========================================
         # CAN Bus Configuration
         # ==========================================
-        self.canbus_enabled = True  # Enable CAN bus interface
+        self.canbus_enabled = False  # Enable CAN bus interface
         self.canbus_channel = "can0"  # CAN channel for vehicle data (can0 or can1)
         self.canbus_bitrate = 500000  # 500 kbps for GM HS-CAN
         self.canbus_vehicle_type = "camaro_2013_lfx"  # Vehicle-specific implementation
         
         # CAN data overlay
-        self.display_canbus_data = True  # Show CAN data on display
+        self.display_canbus_data = False  # Show CAN data on display
         self.canbus_overlay_position = (20, 140)  # Position for CAN data overlay
         
         # CAN data recording
-        self.record_canbus_data = True  # Log CAN data to file
+        self.record_canbus_data = False  # Log CAN data to file
         self.canbus_log_interval = 1.0  # Log CAN data every second
         
         # ==========================================
