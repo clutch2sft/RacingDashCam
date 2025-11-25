@@ -51,6 +51,9 @@ class VideoDisplay:
         self.current_frame = None
         self.frame_lock = Lock()
         self.frame_count = 0
+        # Preallocated framebuffer conversion buffer (allocated on start)
+        self._rgb565 = None
+        self._fb_frame_bytes = None
         
         # Performance tracking
         self.last_fps_calc = time.time()
@@ -130,7 +133,9 @@ class VideoDisplay:
             # Open framebuffer
             self.fb_file = open(self.fb_device, 'wb')
             
-            # Clear screen to black
+            # Preallocate conversion buffer and clear screen to black
+            self._rgb565 = np.zeros((self.height, self.width), dtype=np.uint16)
+            self._fb_frame_bytes = self.width * self.height * 2
             black_frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
             self._write_frame(black_frame)
             
@@ -177,6 +182,7 @@ class VideoDisplay:
     
     def update_frame(self, frame: np.ndarray):
         """Update the current frame to display"""
+        # Store reference to latest frame (avoid copying here)
         with self.frame_lock:
             self.current_frame = frame
             self.frame_count += 1
@@ -199,12 +205,16 @@ class VideoDisplay:
             
             try:
                 # Get current frame
+                # Consume the most recent frame reference without copying.
+                # This reduces allocations; the camera/capture code should
+                # provide a fresh array for each capture.
                 with self.frame_lock:
-                    if self.current_frame is not None:
-                        frame = self.current_frame.copy()
-                    else:
-                        # No frame yet, show black
-                        frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+                    frame = self.current_frame
+                    self.current_frame = None
+
+                if frame is None:
+                    # No frame yet, show black
+                    frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
                 
                 # Apply per-camera transforms (rotation, hflip, vflip) only if
                 # hardware hasn't already applied them. If hardware transform is
@@ -364,16 +374,30 @@ class VideoDisplay:
             except Exception:
                 return frame
 
-        # Separate channels
-        o_rgb = overlay_rgba[:, :, :3].astype(np.float32)
-        o_a = overlay_rgba[:, :, 3:].astype(np.float32) / 255.0
+        # Perform integer alpha blend using uint16 intermediates to avoid
+        # costly float32 allocations. out = (a*o + (255-a)*f) / 255
+        try:
+            o_rgb = overlay_rgba[:, :, :3].astype(np.uint16)
+            o_a = overlay_rgba[:, :, 3].astype(np.uint16)
 
-        f_rgb = frame.astype(np.float32)
+            f_rgb = frame.astype(np.uint16)
 
-        # Composite: out = o_a*o_rgb + (1-o_a)*f_rgb
-        out = (o_a * o_rgb) + ((1.0 - o_a) * f_rgb)
-        out = np.clip(out, 0, 255).astype(np.uint8)
-        return out
+            # Broadcast alpha to three channels and compute in uint32 to avoid overflow
+            a_exp = o_a[:, :, None].astype(np.uint32)
+            o_exp = o_rgb.astype(np.uint32)
+            f_exp = f_rgb.astype(np.uint32)
+
+            out = (a_exp * o_exp + (255 - a_exp) * f_exp + 127) // 255
+            out = np.clip(out, 0, 255).astype(np.uint8)
+            return out
+        except Exception:
+            # Fallback to previous float-based blend on error
+            o_rgb = overlay_rgba[:, :, :3].astype(np.float32)
+            o_a = overlay_rgba[:, :, 3:].astype(np.float32) / 255.0
+            f_rgb = frame.astype(np.float32)
+            out = (o_a * o_rgb) + ((1.0 - o_a) * f_rgb)
+            out = np.clip(out, 0, 255).astype(np.uint8)
+            return out
     
     def _draw_text_with_bg(self, draw: ImageDraw.Draw, text: str, pos: tuple, 
                            color: tuple, font: ImageFont.ImageFont):
@@ -460,27 +484,31 @@ class VideoDisplay:
             if frame.dtype != np.uint8:
                 frame = frame.astype(np.uint8)
 
-            # 3) Split into channels as uint16 for math
+            # 3) Split into channels and pack to RGB565 using a preallocated
+            # buffer to reduce per-frame allocations.
+            if self._rgb565 is None:
+                self._rgb565 = np.zeros((self.height, self.width), dtype=np.uint16)
+
             r = frame[:, :, 0].astype(np.uint16)
             g = frame[:, :, 1].astype(np.uint16)
             b = frame[:, :, 2].astype(np.uint16)
 
-            # 4) Pack to RGB565: 5 bits R, 6 bits G, 5 bits B
-            r5 = (r >> 3) & 0x1F       # top 5 bits
-            g6 = (g >> 2) & 0x3F       # top 6 bits
-            b5 = (b >> 3) & 0x1F       # top 5 bits
+            # Compute 5/6/5 components and pack in-place into preallocated buffer
+            r5 = (r >> 3) & 0x1F
+            g6 = (g >> 2) & 0x3F
+            b5 = (b >> 3) & 0x1F
 
-            rgb565 = ((r5 << 11) | (g6 << 5) | b5).astype(np.uint16)
+            self._rgb565[:, :] = ((r5 << 11) | (g6 << 5) | b5).astype(np.uint16)
 
-            # 5) Convert to bytes (force little-endian uint16 byte order)
-            buf = rgb565.astype('<u2').tobytes()
+            # Convert to bytes and write
+            # Use tobytes() on uint16 array (native endianness) which is little-endian on most Pis
+            buf = self._rgb565.tobytes()
+            if self._fb_frame_bytes is None:
+                self._fb_frame_bytes = self.width * self.height * 2
 
-            expected_bytes = self.width * self.height * 2
-            if len(buf) != expected_bytes:
-                # Safety clamp if something goes weird
-                buf = buf[:expected_bytes]
+            if len(buf) != self._fb_frame_bytes:
+                buf = buf[: self._fb_frame_bytes]
 
-            # 6) Write to framebuffer
             self.fb_file.seek(0)
             self.fb_file.write(buf)
             self.fb_file.flush()
