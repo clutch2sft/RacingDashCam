@@ -23,11 +23,11 @@ class Config:
         # ==========================================
         # Front camera (Arducam HQ 12.3MP) - CSI CAM0 - Picamera2 index 0
         # High-quality camera for front recording
-        self.front_camera_enabled = True
+        self.front_camera_enabled = False
         self.front_camera_index = 0  # CAM0 (closer to USB-C port)
         self.front_camera_width = 1920
         self.front_camera_height = 1080
-        self.front_camera_fps = 30
+        self.front_camera_fps = 15
         self.front_camera_recording_enabled = True
         
         # Rear camera (Arducam HQ 12.3MP) - CSI CAM1 - Picamera2 index 1
@@ -36,7 +36,7 @@ class Config:
         self.rear_camera_index = 1  # CAM1 (closer to HDMI port)
         self.rear_camera_width = 1920  # HQ camera can do 1920x1080
         self.rear_camera_height = 1080
-        self.rear_camera_fps = 30  # CSI can handle 30fps easily
+        self.rear_camera_fps = 15  # Reduced default to 15fps for performance
         self.rear_camera_recording_enabled = True  # Enable recording from rear
         
         # Display configuration - shows rear camera on screen
@@ -80,7 +80,7 @@ class Config:
         # ==========================================
         self.display_width = 1920
         self.display_height = 1080
-        self.display_fps = 30  # Match camera fps for smooth display
+        self.display_fps = 15  # Lower default to 15fps for reduced CPU usage
         
         # Display format (for direct framebuffer rendering)
         self.use_framebuffer = True  # Direct rendering to /dev/fb0
