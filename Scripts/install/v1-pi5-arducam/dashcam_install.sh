@@ -251,6 +251,20 @@ fi
 # Set ownership
 chown -R $SUDO_USER:$SUDO_USER "$REPO_DIR"
 
+# Ensure dashcam.py uses package-qualified imports (fix older clones)
+# This patches legacy top-level imports like `from config import config`
+if [ -f "$REPO_DIR/python/dashcam.py" ]; then
+    if grep -q "from config import config" "$REPO_DIR/python/dashcam.py" 2>/dev/null; then
+        echo -e "${BLUE}Patching legacy imports in dashcam.py...${NC}"
+        sed -i "s|from config import config|from dashcam.core.config import config|g" "$REPO_DIR/python/dashcam.py"
+        sed -i "s|from video_display import VideoDisplay|from dashcam.platforms.pi5_arducam.video_display import VideoDisplay|g" "$REPO_DIR/python/dashcam.py"
+        sed -i "s|from video_recorder import VideoRecorder|from dashcam.platforms.pi5_arducam.video_recorder import VideoRecorder|g" "$REPO_DIR/python/dashcam.py"
+        sed -i "s|from gps_handler import GPSHandler|from dashcam.core.gps_handler import GPSHandler|g" "$REPO_DIR/python/dashcam.py"
+        chown $SUDO_USER:$SUDO_USER "$REPO_DIR/python/dashcam.py"
+        echo -e "${GREEN}✓ dashcam.py imports patched${NC}"
+    fi
+fi
+
 echo -e "${GREEN}✓ Repository cloned/updated${NC}"
 echo "  Location: $REPO_DIR"
 
@@ -455,7 +469,7 @@ WorkingDirectory=$REPO_DIR/python
 Environment="PYTHONUNBUFFERED=1"
 Environment="LIBCAMERA_LOG_LEVELS=*:ERROR"
 Environment="DASHCAM_CONFIG=$CONFIG_DIR/config.yaml"
-ExecStart=$VENV_DIR/bin/python dashcam.py
+ExecStart=$VENV_DIR/bin/python -m dashcam
 Restart=always
 RestartSec=5
 

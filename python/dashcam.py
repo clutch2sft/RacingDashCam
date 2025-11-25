@@ -18,8 +18,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Use package-qualified imports so the script works when executed
 # from the `python/` directory or via systemd with the repo mounted
 from dashcam.core.config import config
-from dashcam.platforms.pi5_arducam.video_display import VideoDisplay
-from dashcam.platforms.pi5_arducam.video_recorder import VideoRecorder
 from dashcam.core.gps_handler import GPSHandler
 
 
@@ -99,8 +97,9 @@ class DashcamSystem:
             # Log configuration
             self._log_configuration()
             
-            # Initialize display
+            # Initialize display (import lazily to avoid circular imports)
             self.logger.info("Starting display...")
+            from dashcam.platforms.pi5_arducam.video_display import VideoDisplay
             self.display = VideoDisplay(self.config)
             if not self.display.start():
                 raise RuntimeError("Failed to start display")
@@ -123,8 +122,9 @@ class DashcamSystem:
             if self.gps and self.display:
                 self.logger.info("Linking GPS to display for speed overlay")
             
-            # Initialize video recorder
+            # Initialize video recorder (import lazily to avoid circular imports)
             self.logger.info("Starting video recorder...")
+            from dashcam.platforms.pi5_arducam.video_recorder import VideoRecorder
             self.recorder = VideoRecorder(self.config, self.display)
             if not self.recorder.start():
                 raise RuntimeError("Failed to start video recorder")
