@@ -7,6 +7,7 @@ import time
 import logging
 import os
 import numpy as np
+import mmap
 from datetime import datetime
 from threading import Thread, Event, Lock
 from typing import Optional
@@ -62,6 +63,7 @@ class VideoDisplay:
         # Profiling accumulators (ms)
         self._prof_enabled = True
         self._prof_frames = 0
+        self._prof_capture = 0.0
         self._prof_transform = 0.0
         self._prof_overlay_render = 0.0
         self._prof_blend = 0.0
@@ -138,12 +140,26 @@ class VideoDisplay:
                 hide_cursor()
             except Exception:
                 pass
-            # Open framebuffer
-            self.fb_file = open(self.fb_device, 'wb')
-            
-            # Preallocate conversion buffer and clear screen to black
-            self._rgb565 = np.zeros((self.height, self.width), dtype=np.uint16)
-            self._fb_frame_bytes = self.width * self.height * 2
+            # Open framebuffer with read/write and memory-map for faster writes
+            try:
+                # Open file descriptor for mmap (O_RDWR required)
+                self._fb_fd = os.open(self.fb_device, os.O_RDWR)
+                # Preallocate conversion buffer and set expected bytes
+                self._rgb565 = np.zeros((self.height, self.width), dtype=np.uint16)
+                self._fb_frame_bytes = self.width * self.height * 2
+                # Create mmap for the framebuffer
+                try:
+                    self._fb_mmap = mmap.mmap(self._fb_fd, self._fb_frame_bytes, access=mmap.ACCESS_WRITE)
+                except Exception:
+                    # If mmap fails, fall back to file-based writes
+                    self._fb_mmap = None
+                    # open file object for fallback writes
+                    self.fb_file = open(self.fb_device, 'wb')
+            except Exception:
+                # Last-resort fallback to simple file open (may fail without permissions)
+                self._fb_fd = None
+                self._fb_mmap = None
+                self.fb_file = open(self.fb_device, 'wb')
             black_frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
             self._write_frame(black_frame)
             
@@ -212,13 +228,14 @@ class VideoDisplay:
             loop_start = time.time()
             
             try:
-                # Get current frame
-                # Consume the most recent frame reference without copying.
-                # This reduces allocations; the camera/capture code should
-                # provide a fresh array for each capture.
+                # Get current frame (measure capture retrieval time)
+                t_get_start = time.time()
                 with self.frame_lock:
                     frame = self.current_frame
                     self.current_frame = None
+                t_get_end = time.time()
+                if self._prof_enabled:
+                    self._prof_capture += (t_get_end - t_get_start) * 1000.0
 
                 if frame is None:
                     # No frame yet, show black
@@ -573,23 +590,28 @@ class VideoDisplay:
 
             self._rgb565[:, :] = ((r5 << 11) | (g6 << 5) | b5).astype(np.uint16)
 
-            # Write through a memoryview to avoid creating a temporary bytes
-            # object from the array (reduces allocation and copy).
+            # Write into mmap if available (fast), otherwise fallback to file write.
             try:
-                mv = memoryview(self._rgb565)
-                self.fb_file.seek(0)
-                self.fb_file.write(mv)
-                self.fb_file.flush()
+                if getattr(self, '_fb_mmap', None) is not None:
+                    # Write raw bytes into mmap; use memoryview to minimize copies
+                    mv = memoryview(self._rgb565)
+                    # mmap expects bytes-like; convert view to bytes on write
+                    # which copies into the mmap region but avoids extra syscalls
+                    self._fb_mmap.seek(0)
+                    self._fb_mmap.write(mv.tobytes())
+                    self._fb_mmap.flush()
+                elif getattr(self, 'fb_file', None) is not None:
+                    mv = memoryview(self._rgb565)
+                    self.fb_file.seek(0)
+                    self.fb_file.write(mv.tobytes())
+                    self.fb_file.flush()
+                else:
+                    # Last resort: open, write, close
+                    with open(self.fb_device, 'wb') as f:
+                        f.write(self._rgb565.tobytes())
             except Exception:
-                # Fallback to bytes if memoryview write not supported
-                buf = self._rgb565.tobytes()
-                if self._fb_frame_bytes is None:
-                    self._fb_frame_bytes = self.width * self.height * 2
-                if len(buf) != self._fb_frame_bytes:
-                    buf = buf[: self._fb_frame_bytes]
-                self.fb_file.seek(0)
-                self.fb_file.write(buf)
-                self.fb_file.flush()
+                # If anything fails, log at debug and continue
+                self.logger.debug("Framebuffer write via mmap/file failed; skipping frame write")
 
         except Exception as e:
             self.logger.error(f"Failed to write frame: {e}")
