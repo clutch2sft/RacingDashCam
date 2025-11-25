@@ -59,6 +59,14 @@ class VideoDisplay:
         self.last_fps_calc = time.time()
         self.fps_frame_count = 0
         self.actual_fps = 0.0
+        # Profiling accumulators (ms)
+        self._prof_enabled = True
+        self._prof_frames = 0
+        self._prof_transform = 0.0
+        self._prof_overlay_render = 0.0
+        self._prof_blend = 0.0
+        self._prof_write = 0.0
+        self._prof_other = 0.0
         
         # Overlay state
         self.recording = False
@@ -219,6 +227,7 @@ class VideoDisplay:
                 # Apply per-camera transforms (rotation, hflip, vflip) only if
                 # hardware hasn't already applied them. If hardware transform is
                 # applied we skip software rotation/flips to avoid double-transform.
+                t_start = time.time()
                 if not getattr(self, 'hw_transform_applied', False):
                     try:
                         cam_cfg = self.config.get_camera_config(self.config.display_camera_index)
@@ -231,6 +240,9 @@ class VideoDisplay:
                         vflip = False
 
                     frame = self._apply_transform(frame, rotation, hflip, vflip, mirror_mode=self.mirror_mode)
+                t_after_transform = time.time()
+                if self._prof_enabled:
+                    self._prof_transform += (t_after_transform - t_start) * 1000.0
                 
                 # Add overlay if enabled. Use cached overlay rendered only
                 # when content changes (time second, GPS speed, REC state).
@@ -258,11 +270,15 @@ class VideoDisplay:
                         )
 
                         if needs_update:
+                            t_or_start = time.time()
                             try:
                                 self._overlay_rgba = self._render_overlay_rgba()
                             except Exception as e:
                                 self.logger.debug(f"Overlay render failed: {e}")
                                 self._overlay_rgba = None
+                            t_or_end = time.time()
+                            if self._prof_enabled:
+                                self._prof_overlay_render += (t_or_end - t_or_start) * 1000.0
 
                             self._overlay_last_time_sec = now_sec
                             self._overlay_last_speed = cs
@@ -270,22 +286,58 @@ class VideoDisplay:
 
                     # Composite overlay (fast NumPy blend)
                     try:
+                        t_bl_start = time.time()
                         frame = self._blend_overlay(frame, self._overlay_rgba)
+                        t_bl_end = time.time()
+                        if self._prof_enabled:
+                            self._prof_blend += (t_bl_end - t_bl_start) * 1000.0
                     except Exception as e:
                         self.logger.debug(f"Overlay blend failed: {e}")
                 
                 # Write to framebuffer
+                t_w_start = time.time()
                 self._write_frame(frame)
+                t_w_end = time.time()
+                if self._prof_enabled:
+                    self._prof_write += (t_w_end - t_w_start) * 1000.0
                 
-                # Update FPS counter
+                # Update FPS counter and profiling frame count
                 self.fps_frame_count += 1
+                if self._prof_enabled:
+                    self._prof_frames += 1
+
                 if time.time() - self.last_fps_calc >= 1.0:
-                    self.actual_fps = self.fps_frame_count / (time.time() - self.last_fps_calc)
+                    interval = time.time() - self.last_fps_calc
+                    frames = self.fps_frame_count
+                    self.actual_fps = frames / interval if interval > 0 else 0.0
+                    # Compute per-stage averages
+                    if self._prof_enabled and self._prof_frames > 0:
+                        avg_transform = self._prof_transform / max(1, self._prof_frames)
+                        avg_overlay = self._prof_overlay_render / max(1, self._prof_frames)
+                        avg_blend = self._prof_blend / max(1, self._prof_frames)
+                        avg_write = self._prof_write / max(1, self._prof_frames)
+                        avg_other = max(0.0, (interval*1000.0) - (avg_transform + avg_overlay + avg_blend + avg_write))
+                    else:
+                        avg_transform = avg_overlay = avg_blend = avg_write = avg_other = 0.0
+
                     self.fps_frame_count = 0
                     self.last_fps_calc = time.time()
-                    
-                    if self.config.log_fps:
-                        self.logger.debug(f"Display FPS: {self.actual_fps:.1f}")
+                    # Reset profiling accumulators
+                    if self._prof_enabled:
+                        self.logger.debug(
+                            f"Display FPS: {self.actual_fps:.1f} | timings (ms/frame): "
+                            f"transform={avg_transform:.1f} overlay_render={avg_overlay:.1f} "
+                            f"blend={avg_blend:.1f} write={avg_write:.1f} other~={avg_other:.1f}"
+                        )
+                        self._prof_frames = 0
+                        self._prof_transform = 0.0
+                        self._prof_overlay_render = 0.0
+                        self._prof_blend = 0.0
+                        self._prof_write = 0.0
+                        self._prof_other = 0.0
+                    else:
+                        if self.config.log_fps:
+                            self.logger.debug(f"Display FPS: {self.actual_fps:.1f}")
                 
             except Exception as e:
                 self.logger.error(f"Display loop error: {e}")
