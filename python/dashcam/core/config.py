@@ -26,7 +26,7 @@ class Config:
         # ==========================================
         # Front camera (Arducam HQ 12.3MP) - CSI CAM0 - Picamera2 index 0
         # High-quality camera for front recording
-        self.front_camera_enabled = False
+        self.front_camera_enabled = True
         self.front_camera_index = 0  # CAM0 (closer to USB-C port)
         self.front_camera_width = 1920
         self.front_camera_height = 1080
