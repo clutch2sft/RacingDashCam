@@ -7,7 +7,6 @@ import time
 import logging
 import os
 import numpy as np
-import mmap
 from datetime import datetime
 from threading import Thread, Event, Lock
 from typing import Optional
@@ -140,26 +139,18 @@ class VideoDisplay:
                 hide_cursor()
             except Exception:
                 pass
-            # Open framebuffer with read/write and memory-map for faster writes
+            # Open framebuffer file for binary writes. Avoid mmap due to
+            # observed periodic blanking on some platforms/drivers.
             try:
-                # Open file descriptor for mmap (O_RDWR required)
-                self._fb_fd = os.open(self.fb_device, os.O_RDWR)
-                # Preallocate conversion buffer and set expected bytes
-                self._rgb565 = np.zeros((self.height, self.width), dtype=np.uint16)
-                self._fb_frame_bytes = self.width * self.height * 2
-                # Create mmap for the framebuffer
-                try:
-                    self._fb_mmap = mmap.mmap(self._fb_fd, self._fb_frame_bytes, access=mmap.ACCESS_WRITE)
-                except Exception:
-                    # If mmap fails, fall back to file-based writes
-                    self._fb_mmap = None
-                    # open file object for fallback writes
-                    self.fb_file = open(self.fb_device, 'wb')
+                # Use r+b to avoid truncation while allowing writes
+                self.fb_file = open(self.fb_device, 'r+b')
             except Exception:
-                # Last-resort fallback to simple file open (may fail without permissions)
-                self._fb_fd = None
-                self._fb_mmap = None
+                # Fallback to wb if r+b not permitted
                 self.fb_file = open(self.fb_device, 'wb')
+
+            # Preallocate conversion buffer and clear screen to black
+            self._rgb565 = np.zeros((self.height, self.width), dtype=np.uint16)
+            self._fb_frame_bytes = self.width * self.height * 2
             black_frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
             self._write_frame(black_frame)
             
@@ -592,26 +583,19 @@ class VideoDisplay:
 
             # Write into mmap if available (fast), otherwise fallback to file write.
             try:
-                if getattr(self, '_fb_mmap', None) is not None:
-                    # Write raw bytes into mmap; use memoryview to minimize copies
-                    mv = memoryview(self._rgb565)
-                    # mmap expects bytes-like; convert view to bytes on write
-                    # which copies into the mmap region but avoids extra syscalls
-                    self._fb_mmap.seek(0)
-                    self._fb_mmap.write(mv.tobytes())
-                    self._fb_mmap.flush()
-                elif getattr(self, 'fb_file', None) is not None:
-                    mv = memoryview(self._rgb565)
+                # Use memoryview to avoid an extra large temporary allocation
+                # where possible. Convert to little-endian uint16 before
+                # obtaining bytes to match framebuffer expectations.
+                buf = self._rgb565.astype('<u2').tobytes()
+                if getattr(self, 'fb_file', None) is not None:
                     self.fb_file.seek(0)
-                    self.fb_file.write(mv.tobytes())
+                    self.fb_file.write(buf)
                     self.fb_file.flush()
                 else:
-                    # Last resort: open, write, close
                     with open(self.fb_device, 'wb') as f:
-                        f.write(self._rgb565.tobytes())
+                        f.write(buf)
             except Exception:
-                # If anything fails, log at debug and continue
-                self.logger.debug("Framebuffer write via mmap/file failed; skipping frame write")
+                self.logger.debug("Framebuffer write failed; skipping frame write")
 
         except Exception as e:
             self.logger.error(f"Failed to write frame: {e}")
