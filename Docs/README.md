@@ -386,6 +386,10 @@ self.disk_high_water_mark = 0.60  # Start at 60% instead of 75%
 
 - **[SETUP_GUIDE.md](SETUP_GUIDE.md)** - Complete hardware and software setup
 - **[CANBUS_GUIDE.md](CANBUS_GUIDE.md)** - CAN bus integration details
+- **[GPS_TIME_SYNC_GUIDE.md](GPS_TIME_SYNC_GUIDE.md)** - GPS time synchronization with Chrony
+- **[GPS_TIME_SYNC_QUICK.md](GPS_TIME_SYNC_QUICK.md)** - GPS time sync quick reference
+- **[GPS_LC29H_SETUP.md](GPS_LC29H_SETUP.md)** - LC29H GPS module setup
+- **[GPS_QUICK_REFERENCE.md](GPS_QUICK_REFERENCE.md)** - GPS quick commands
 
 ## Project Structure
 
