@@ -33,6 +33,7 @@ class DashcamSystem:
         self.display = None
         self.recorder = None
         self.gps = None
+        self.next_gps_retry = 0.0
         
         # Setup logging
         self._setup_logging()
@@ -112,8 +113,9 @@ class DashcamSystem:
                     if self.config.gps_required:
                         raise RuntimeError("GPS is required but failed to start")
                     else:
-                        self.logger.warning("GPS failed to start, continuing without GPS")
+                        self.logger.warning("GPS failed to start, will retry in background")
                         self.gps = None
+                        self.next_gps_retry = time.time() + self.config.gps_retry_delay
             else:
                 self.logger.info("GPS disabled in configuration")
                 self.gps = None
@@ -187,6 +189,24 @@ class DashcamSystem:
         try:
             while self.running:
                 time.sleep(1.0)
+                
+                # Retry GPS startup if it failed or stopped
+                if (
+                    self.config.gps_enabled and 
+                    (self.gps is None or not getattr(self.gps, 'running', False))
+                ):
+                    if time.time() >= self.next_gps_retry:
+                        self.logger.info("Attempting to (re)start GPS...")
+                        self.gps = GPSHandler(self.config)
+                        if self.gps.start():
+                            self.logger.info("GPS (re)started successfully")
+                            self.next_gps_retry = 0.0
+                        else:
+                            self.logger.warning(
+                                f"GPS start retry failed; will retry in {self.config.gps_retry_delay}s"
+                            )
+                            self.gps = None
+                            self.next_gps_retry = time.time() + self.config.gps_retry_delay
                 
                 # Update GPS data to display if available
                 if self.gps and self.display and self.config.display_speed:

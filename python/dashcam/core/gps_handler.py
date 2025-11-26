@@ -60,7 +60,7 @@ class GPSHandler:
         
         # Recovery
         self.retry_count = 0
-        self.last_data_time = time.time()
+        self.last_data_time = None
         
     def start(self):
         """Start GPS handler"""
@@ -68,11 +68,27 @@ class GPSHandler:
             return False
             
         try:
-            # Connect to GPSD
-            # Note: gpsd should be configured to listen on localhost:2947 (default)
-            # and should already be monitoring the configured GPS device
-            self.logger.info(f"Connecting to GPSD (device: {self.config.gps_device} @ {self.config.gps_baudrate} baud)...")
-            self.session = gps.gps(mode=gps.WATCH_ENABLE | gps.WATCH_NEWSTYLE)
+            # Connect to GPSD with retries in case the daemon isn't ready yet
+            attempts = max(1, int(self.config.gps_retry_attempts))
+            for attempt in range(1, attempts + 1):
+                try:
+                    # Note: gpsd should be configured to listen on localhost:2947 (default)
+                    # and should already be monitoring the configured GPS device
+                    self.logger.info(
+                        f"Connecting to GPSD (device: {self.config.gps_device} @ {self.config.gps_baudrate} baud)... "
+                        f"[attempt {attempt}/{attempts}]"
+                    )
+                    self.session = gps.gps(mode=gps.WATCH_ENABLE | gps.WATCH_NEWSTYLE)
+                    break
+                except Exception as e:
+                    self.logger.warning(f"GPSD connection attempt {attempt}/{attempts} failed: {e}")
+                    if attempt >= attempts:
+                        raise
+                    time.sleep(self.config.gps_retry_delay)
+            
+            # Reset runtime state for a fresh start
+            self.retry_count = 0
+            self.last_data_time = None
             
             # Open log file
             self.log_file = open(self.log_path, 'w')
@@ -116,33 +132,36 @@ class GPSHandler:
     def _process_loop(self):
         """Main GPS processing loop"""
         first_entry = True
-        
-        while self.running and not self.stop_event.is_set():
-            try:
-                # Read GPS data with timeout
-                if self.session.waiting(timeout=1.0):
-                    report = self.session.next()
-                    
-                    if report['class'] == 'TPV':
-                        # Time-Position-Velocity report
-                        self._update_from_tpv(report)
-                        self.last_data_time = time.time()
+        try:
+            while self.running and not self.stop_event.is_set():
+                try:
+                    # Read GPS data with timeout
+                    if self.session.waiting(timeout=1.0):
+                        report = self.session.next()
                         
-                        # Log data
-                        if time.time() % self.config.gps_log_interval < 0.1:
-                            self._log_data(first_entry)
-                            first_entry = False
-                
-                # Check for stale data
-                if time.time() - self.last_data_time > 10.0:
-                    self.logger.warning("GPS data is stale, attempting recovery...")
+                        if report['class'] == 'TPV':
+                            # Time-Position-Velocity report
+                            self._update_from_tpv(report)
+                            self.last_data_time = time.time()
+                            
+                            # Log data
+                            if time.time() % self.config.gps_log_interval < 0.1:
+                                self._log_data(first_entry)
+                                first_entry = False
+                    
+                    # Check for stale data only after we have seen at least one report
+                    if self.last_data_time and (time.time() - self.last_data_time > 10.0):
+                        self.logger.warning("GPS data is stale, attempting recovery...")
+                        if not self._recover():
+                            break
+                            
+                except Exception as e:
+                    self.logger.error(f"GPS processing error: {e}")
                     if not self._recover():
                         break
-                        
-            except Exception as e:
-                self.logger.error(f"GPS processing error: {e}")
-                if not self._recover():
-                    break
+        finally:
+            # Ensure running flag reflects thread state if we exit unexpectedly
+            self.running = False
     
     def _update_from_tpv(self, report: Dict):
         """Update GPS data from TPV report"""
@@ -209,6 +228,7 @@ class GPSHandler:
             # Try to reconnect
             self.session = gps.gps(mode=gps.WATCH_ENABLE | gps.WATCH_NEWSTYLE)
             self.retry_count = 0
+            self.last_data_time = None
             self.logger.info("GPS recovered successfully")
             return True
             
