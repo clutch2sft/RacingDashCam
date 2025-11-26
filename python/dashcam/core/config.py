@@ -133,7 +133,7 @@ class Config:
         self.gps_log_interval = 1.0  # Log GPS data every second
         
         # GPS display
-        self.display_speed = False  # Show speed on overlay
+        self.display_speed = True  # Show speed on overlay
         self.speed_unit = "mph"  # "mph" or "kph"
         
         # Speed-based recording (when GPS is enabled)
