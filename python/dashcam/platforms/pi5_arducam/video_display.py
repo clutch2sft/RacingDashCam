@@ -616,6 +616,7 @@ class VideoDisplay:
                 self._rgb565 = np.zeros((self.height, self.width), dtype=np.uint16)
             
             pack_rgb565_jit(frame, self._rgb565)
+            buf = self._rgb565.astype('<u2').tobytes()
             
             t_pack_end = time.time()
 
