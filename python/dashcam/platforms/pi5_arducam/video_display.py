@@ -588,19 +588,16 @@ class VideoDisplay:
             # 3) OPTIMIZED RGB565 packing - Single vectorized expression
             t_pack_start = time.time()
             
-            # Extract channels once (views, not copies)
-            r = frame[:, :, 0]
-            g = frame[:, :, 1]
-            b = frame[:, :, 2]
+            # Convert entire frame to uint16 once (much faster than 3 separate conversions)
+            frame_u16 = frame.astype(np.uint16)
             
-            # Single vectorized expression for RGB565 packing
-            # Eliminates intermediate uint16 arrays and multiple operations
-            # This is 3-5x faster than the original multi-step approach
-            self._rgb565 = (
-                ((r.astype(np.uint16) & 0xF8) << 8) |  # Red: 5 bits at positions 11-15
-                ((g.astype(np.uint16) & 0xFC) << 3) |  # Green: 6 bits at positions 5-10
-                ((b.astype(np.uint16) & 0xF8) >> 3)    # Blue: 5 bits at positions 0-4
-            )
+            # Extract channels as uint16 views
+            r = frame_u16[:, :, 0]
+            g = frame_u16[:, :, 1]
+            b = frame_u16[:, :, 2]
+            
+            # Single vectorized RGB565 packing expression
+            self._rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | ((b & 0xF8) >> 3)
             
             t_pack_end = time.time()
 
