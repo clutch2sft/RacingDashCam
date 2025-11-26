@@ -67,6 +67,10 @@ class VideoDisplay:
         self._prof_overlay_render = 0.0
         self._prof_blend = 0.0
         self._prof_write = 0.0
+        # Breakdown of write step
+        self._prof_resize = 0.0
+        self._prof_pack = 0.0
+        self._prof_fbwrite = 0.0
         self._prof_other = 0.0
         
         # Overlay state
@@ -309,6 +313,7 @@ class VideoDisplay:
                 self._write_frame(frame)
                 t_w_end = time.time()
                 if self._prof_enabled:
+                    # Keep overall write time (for backward compatibility)
                     self._prof_write += (t_w_end - t_w_start) * 1000.0
                 
                 # Update FPS counter and profiling frame count
@@ -326,6 +331,9 @@ class VideoDisplay:
                         avg_overlay = self._prof_overlay_render / max(1, self._prof_frames)
                         avg_blend = self._prof_blend / max(1, self._prof_frames)
                         avg_write = self._prof_write / max(1, self._prof_frames)
+                        avg_resize = self._prof_resize / max(1, self._prof_frames)
+                        avg_pack = self._prof_pack / max(1, self._prof_frames)
+                        avg_fbwrite = self._prof_fbwrite / max(1, self._prof_frames)
                         # avg_other should be per-frame remainder: total ms per frame
                         avg_other = max(0.0, (interval * 1000.0) / max(1, frames) - (avg_transform + avg_overlay + avg_blend + avg_write))
                     else:
@@ -338,7 +346,9 @@ class VideoDisplay:
                         self.logger.debug(
                             f"Display FPS: {self.actual_fps:.1f} | timings (ms/frame): "
                             f"transform={avg_transform:.1f} overlay_render={avg_overlay:.1f} "
-                            f"blend={avg_blend:.1f} write={avg_write:.1f} other~={avg_other:.1f}"
+                            f"blend={avg_blend:.1f} write={avg_write:.1f} "
+                            f"(resize={avg_resize:.1f} pack={avg_pack:.1f} fb={avg_fbwrite:.1f}) "
+                            f"other~={avg_other:.1f}"
                         )
                         self._prof_frames = 0
                         self._prof_transform = 0.0
@@ -346,6 +356,9 @@ class VideoDisplay:
                         self._prof_blend = 0.0
                         self._prof_write = 0.0
                         self._prof_other = 0.0
+                        self._prof_resize = 0.0
+                        self._prof_pack = 0.0
+                        self._prof_fbwrite = 0.0
                     else:
                         if self.config.log_fps:
                             self.logger.debug(f"Display FPS: {self.actual_fps:.1f}")
@@ -560,8 +573,10 @@ class VideoDisplay:
         try:
             # 1) Resize to framebuffer resolution if needed using a fast
             # nearest-neighbor NumPy sampler to avoid PIL allocations.
+            t_resize_start = time.time()
             if frame.shape[0] != self.height or frame.shape[1] != self.width:
                 frame = self._resize_nn(frame, self.width, self.height)
+            t_resize_end = time.time()
 
             # 2) Ensure 8-bit channels
             if frame.dtype != np.uint8:
@@ -569,6 +584,7 @@ class VideoDisplay:
 
             # 3) Split into channels and pack to RGB565 using a preallocated
             # buffer to reduce per-frame allocations.
+            t_pack_start = time.time()
             if self._rgb565 is None:
                 self._rgb565 = np.zeros((self.height, self.width), dtype=np.uint16)
 
@@ -582,12 +598,11 @@ class VideoDisplay:
             b5 = (b >> 3) & 0x1F
 
             self._rgb565[:, :] = ((r5 << 11) | (g6 << 5) | b5).astype(np.uint16)
+            t_pack_end = time.time()
 
-            # Write into mmap if available (fast), otherwise fallback to file write.
+            # 4) Write to framebuffer (convert to little-endian bytes)
+            t_fb_start = time.time()
             try:
-                # Use memoryview to avoid an extra large temporary allocation
-                # where possible. Convert to little-endian uint16 before
-                # obtaining bytes to match framebuffer expectations.
                 buf = self._rgb565.astype('<u2').tobytes()
                 if getattr(self, 'fb_file', None) is not None:
                     self.fb_file.seek(0)
@@ -598,6 +613,13 @@ class VideoDisplay:
                         f.write(buf)
             except Exception:
                 self.logger.debug("Framebuffer write failed; skipping frame write")
+            t_fb_end = time.time()
+
+            # Record profiling breakdown
+            if self._prof_enabled:
+                self._prof_resize += (t_resize_end - t_resize_start) * 1000.0
+                self._prof_pack += (t_pack_end - t_pack_start) * 1000.0
+                self._prof_fbwrite += (t_fb_end - t_fb_start) * 1000.0
 
         except Exception as e:
             self.logger.error(f"Failed to write frame: {e}")
