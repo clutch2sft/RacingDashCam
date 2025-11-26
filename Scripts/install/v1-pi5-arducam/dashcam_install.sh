@@ -41,6 +41,13 @@ VIDEO_DIR="$VIDEO_BASE/videos"
 LOG_DIR="$VIDEO_BASE/logs"
 CONFIG_DIR="/etc/dashcam"
 VENV_DIR="$INSTALL_BASE/venv"
+WIFI_COUNTRY="${WIFI_COUNTRY:-US}"
+AP_SSID="${AP_SSID:-dashcamxfer}"
+AP_PSK="${AP_PSK:-changeme}"
+AP_IP="10.42.0.1"
+AP_RANGE_START="10.42.0.50"
+AP_RANGE_END="10.42.0.150"
+AP_NETMASK="255.255.255.0"
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}  Active Dash Mirror Installation${NC}"
@@ -225,12 +232,146 @@ apt install -y \
     rsync \
     libcap-dev \
     i2c-tools \
-    chrony
+    chrony \
+    hostapd \
+    dnsmasq
 
 echo -e "${GREEN}✓ System packages installed${NC}"
 
 echo ""
-echo -e "${GREEN}Step 5: Creating directory structure...${NC}"
+echo -e "${GREEN}Step 5: Configuring Wi-Fi access point...${NC}"
+
+echo -e "${BLUE}Setting Wi-Fi country to ${WIFI_COUNTRY}...${NC}"
+if command -v raspi-config >/dev/null 2>&1; then
+    raspi-config nonint do_wifi_country "$WIFI_COUNTRY" || true
+fi
+iw reg set "$WIFI_COUNTRY" 2>/dev/null || true
+rfkill unblock wifi 2>/dev/null || true
+
+AP_CONFIGURED=0
+
+if systemctl is-active --quiet NetworkManager && command -v nmcli >/dev/null 2>&1; then
+    echo -e "${BLUE}NetworkManager detected, creating hotspot...${NC}"
+    nmcli connection show "$AP_SSID" &>/dev/null && nmcli connection delete "$AP_SSID"
+    if nmcli connection add type wifi ifname wlan0 con-name "$AP_SSID" autoconnect yes ssid "$AP_SSID"; then
+        nmcli connection modify "$AP_SSID" \
+            802-11-wireless.mode ap \
+            802-11-wireless.band bg \
+            ipv4.method shared \
+            ipv4.addresses "$AP_IP/24" \
+            ipv4.gateway "$AP_IP" \
+            wifi-sec.key-mgmt wpa-psk \
+            wifi-sec.psk "$AP_PSK"
+        nmcli connection up "$AP_SSID" || echo -e "${YELLOW}⚠ NetworkManager hotspot created but failed to start; check wlan0 status${NC}"
+
+        # Avoid conflicts with standalone hostapd/dnsmasq when NetworkManager is managing the hotspot
+        systemctl stop hostapd dnsmasq 2>/dev/null || true
+        systemctl disable hostapd dnsmasq 2>/dev/null || true
+
+        echo -e "${GREEN}✓ Access point configured via NetworkManager (SSID: $AP_SSID)${NC}"
+        AP_CONFIGURED=1
+    else
+        echo -e "${YELLOW}⚠ Failed to configure hotspot via NetworkManager, falling back to hostapd/dnsmasq${NC}"
+    fi
+fi
+
+if [ "$AP_CONFIGURED" -eq 0 ]; then
+    echo -e "${BLUE}Configuring hostapd + dnsmasq for Wi-Fi access point...${NC}"
+
+    # Ensure NetworkManager does not interfere if present
+    if systemctl is-active --quiet NetworkManager && command -v nmcli >/dev/null 2>&1; then
+        nmcli device set wlan0 managed no 2>/dev/null || true
+    fi
+
+    # Static IP for AP interface
+    if systemctl list-unit-files | grep -q '^dhcpcd.service'; then
+        sed -i '/^# Dashcam AP configuration start$/,/^# Dashcam AP configuration end$/d' /etc/dhcpcd.conf
+        cat >> /etc/dhcpcd.conf <<EOF
+# Dashcam AP configuration start
+interface wlan0
+    static ip_address=$AP_IP/24
+    nohook wpa_supplicant
+# Dashcam AP configuration end
+EOF
+        systemctl restart dhcpcd 2>/dev/null || true
+    else
+        mkdir -p /etc/systemd/network
+        cat > /etc/systemd/network/08-wlan0-ap.network <<EOF
+[Match]
+Name=wlan0
+
+[Network]
+Address=$AP_IP/24
+DHCPServer=no
+IPv6AcceptRA=no
+
+[Link]
+RequiredForOnline=no
+EOF
+        systemctl enable systemd-networkd 2>/dev/null || true
+        systemctl restart systemd-networkd 2>/dev/null || true
+    fi
+
+    # DHCP for clients
+    cat > /etc/dnsmasq.d/dashcam-ap.conf <<EOF
+interface=wlan0
+dhcp-range=$AP_RANGE_START,$AP_RANGE_END,$AP_NETMASK,12h
+domain-needed
+bogus-priv
+EOF
+
+    # hostapd configuration
+    cat > /etc/hostapd/hostapd.conf <<EOF
+country_code=$WIFI_COUNTRY
+interface=wlan0
+ssid=$AP_SSID
+hw_mode=g
+channel=6
+ieee80211n=1
+ieee80211d=1
+wmm_enabled=1
+auth_algs=1
+wpa=2
+wpa_passphrase=$AP_PSK
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+EOF
+
+    if grep -q "^#DAEMON_CONF=" /etc/default/hostapd 2>/dev/null; then
+        sed -i 's|^#DAEMON_CONF=.*|DAEMON_CONF="/etc/hostapd/hostapd.conf"|' /etc/default/hostapd
+    elif ! grep -q "^DAEMON_CONF=" /etc/default/hostapd 2>/dev/null; then
+        echo 'DAEMON_CONF="/etc/hostapd/hostapd.conf"' >> /etc/default/hostapd
+    else
+        sed -i 's|^DAEMON_CONF=.*|DAEMON_CONF="/etc/hostapd/hostapd.conf"|' /etc/default/hostapd
+    fi
+
+    systemctl unmask hostapd 2>/dev/null || true
+    systemctl stop wpa_supplicant@wlan0.service 2>/dev/null || true
+    systemctl disable wpa_supplicant@wlan0.service 2>/dev/null || true
+
+    RESTART_STATUS=0
+
+    if ! systemctl enable hostapd dnsmasq; then
+        RESTART_STATUS=1
+    fi
+
+    systemctl restart hostapd 2>/dev/null || RESTART_STATUS=1
+    systemctl restart dnsmasq 2>/dev/null || RESTART_STATUS=1
+
+    if [ "$RESTART_STATUS" -eq 0 ]; then
+        echo -e "${GREEN}✓ Access point configured (SSID: $AP_SSID, PSK: $AP_PSK, IP: $AP_IP)${NC}"
+        AP_CONFIGURED=1
+    else
+        echo -e "${YELLOW}⚠ AP services configured but failed to start; check hostapd/dnsmasq logs${NC}"
+    fi
+fi
+
+if [ "$AP_CONFIGURED" -eq 0 ]; then
+    echo -e "${YELLOW}⚠ Wi-Fi AP setup did not complete successfully${NC}"
+fi
+
+echo ""
+echo -e "${GREEN}Step 6: Creating directory structure...${NC}"
 
 # Create application directories
 mkdir -p "$INSTALL_BASE"
@@ -258,7 +399,7 @@ echo "  Videos:  $VIDEO_DIR"
 echo "  Logs:    $LOG_DIR"
 
 echo ""
-echo -e "${GREEN}Step 6: Cloning repository from GitHub...${NC}"
+echo -e "${GREEN}Step 7: Cloning repository from GitHub...${NC}"
 
 if [ -d "$REPO_DIR" ]; then
     echo -e "${YELLOW}Repository already exists, pulling latest changes...${NC}"
@@ -290,7 +431,7 @@ echo -e "${GREEN}✓ Repository cloned/updated${NC}"
 echo "  Location: $REPO_DIR"
 
 echo ""
-echo -e "${GREEN}Step 7: Setting up Python virtual environment...${NC}"
+echo -e "${GREEN}Step 8: Setting up Python virtual environment...${NC}"
 
 # Create venv with system-site-packages for Picamera2 access
 python3 -m venv --system-site-packages "$VENV_DIR"
@@ -318,7 +459,7 @@ echo -e "${GREEN}✓ Virtual environment created and packages installed${NC}"
 echo "  Location: $VENV_DIR"
 
 echo ""
-echo -e "${GREEN}Step 8: Creating default configuration...${NC}"
+echo -e "${GREEN}Step 9: Creating default configuration...${NC}"
 
 # Create a default config file if it doesn't exist
 if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
@@ -402,7 +543,7 @@ echo "  rpicam-hello --list-cameras"
 echo ""
 
 echo ""
-echo -e "${GREEN}Step 9: Configuring GPS (GPSD)...${NC}"
+echo -e "${GREEN}Step 10: Configuring GPS (GPSD)...${NC}"
 
 # Configure GPSD for LC29H module
 cat > /etc/default/gpsd << 'EOF'
@@ -439,7 +580,7 @@ if [ -n "$SUDO_USER" ]; then
 fi
 
 echo ""
-echo -e "${GREEN}Step 10: Enabling GPS PPS time sync...${NC}"
+echo -e "${GREEN}Step 11: Enabling GPS PPS time sync...${NC}"
 
 # Ensure PPS overlay on GPIO 18 is configured
 if grep -q "dtoverlay=pps-gpio,gpiopin=18" "$CONFIG_FILE"; then
@@ -586,7 +727,7 @@ echo "  - Chrony configured with GPS + PPS"
 echo "  - Status script: dashcam-gps-status"
 
 echo ""
-echo -e "${GREEN}Step 11: Configuring CAN bus...${NC}"
+echo -e "${GREEN}Step 12: Configuring CAN bus...${NC}"
 
 # Create systemd service to bring up CAN interfaces on boot
 cat > /etc/systemd/system/can-setup.service << 'EOF'
@@ -629,7 +770,7 @@ echo -e "${GREEN}✓ CAN bus configured${NC}"
 echo "  CAN0 and CAN1 will be configured at boot (500 kbps)"
 
 echo ""
-echo -e "${GREEN}Step 12: Creating systemd service...${NC}"
+echo -e "${GREEN}Step 13: Creating systemd service...${NC}"
 
 cat > /etc/systemd/system/dashcam.service << EOF
 [Unit]
@@ -662,7 +803,7 @@ systemctl enable dashcam.service
 echo -e "${GREEN}✓ Systemd service created and enabled${NC}"
 
 echo ""
-echo -e "${GREEN}Step 13: Disabling screen blanking...${NC}"
+echo -e "${GREEN}Step 14: Disabling screen blanking...${NC}"
 
 # Add to rc.local
 if [ ! -f /etc/rc.local ]; then
@@ -684,7 +825,7 @@ fi
 echo -e "${GREEN}✓ Screen blanking disabled${NC}"
 
 echo ""
-echo -e "${GREEN}Step 14: Configuring framebuffer permissions...${NC}"
+echo -e "${GREEN}Step 15: Configuring framebuffer permissions...${NC}"
 
 # Add user to video group for framebuffer access
 usermod -a -G video $SUDO_USER
@@ -707,7 +848,7 @@ EOF
 echo -e "${GREEN}✓ Framebuffer udev rule created${NC}"
 
 echo ""
-echo -e "${GREEN}Step 15: Setting boot order for NVMe...${NC}"
+echo -e "${GREEN}Step 16: Setting boot order for NVMe...${NC}"
 
 # Set boot order to try NVMe first
 BOOT_CONFIG="/tmp/bootloader_config.txt"
@@ -724,7 +865,7 @@ fi
 rm -f "$BOOT_CONFIG"
 
 echo ""
-echo -e "${GREEN}Step 16: Creating convenience scripts...${NC}"
+echo -e "${GREEN}Step 17: Creating convenience scripts...${NC}"
 
 # Camera test script
 cat > /usr/local/bin/dashcam-test-cameras << 'TESTEOF'
@@ -854,6 +995,7 @@ echo "    - CAM0: Arducam HQ 12.3MP (front)"
 echo "    - CAM1: Arducam HQ 12.3MP (rear mirror)"
 echo "  ✓ GPU memory set to 256MB for dual cameras"
 echo "  ✓ CMA memory set to 512MB for video buffers"
+echo "  ✓ Wi-Fi access point ready for transfers (SSID: $AP_SSID, PSK: $AP_PSK, IP: $AP_IP)"
 echo "  ✓ GPS configured (LC29H on serial port) with PPS + chrony time sync"
 echo "  ✓ CAN bus configured (Waveshare 2-CH CAN HAT)"
 echo "  ✓ Repository cloned: $REPO_DIR"
@@ -875,26 +1017,30 @@ echo ""
 echo "Next steps:"
 echo "  1. REBOOT: sudo reboot"
 echo ""
-echo "  2. After reboot, test cameras:"
+echo "  2. Connect to the dashcam Wi-Fi for transfers (SSID: $AP_SSID, PSK: $AP_PSK, IP: $AP_IP)"
+echo "     ssh $SUDO_USER@$AP_IP"
+echo "     sftp $SUDO_USER@$AP_IP"
+echo ""
+echo "  3. After reboot, test cameras:"
 echo "     dashcam-test-cameras"
 echo ""
-echo "  3. Check system status:"
+echo "  4. Check system status:"
 echo "     dashcam-status"
 echo ""
-echo "  4. Edit configuration:"
+echo "  5. Edit configuration:"
 echo "     sudo nano $CONFIG_DIR/config.yaml"
 echo ""
-echo "  5. Verify GPS/PPS time sync:"
+echo "  6. Verify GPS/PPS time sync:"
 echo "     dashcam-gps-status"
 echo ""
-echo "  6. Service management:"
+echo "  7. Service management:"
 echo "     sudo systemctl start dashcam   # Start"
 echo "     sudo systemctl stop dashcam    # Stop"
 echo "     sudo systemctl status dashcam  # Check status"
 echo "     sudo systemctl restart dashcam # Restart"
 echo "     journalctl -u dashcam -f       # View logs"
 echo ""
-echo "  7. Update software:"
+echo "  8. Update software:"
 echo "     dashcam-update"
 echo ""
 echo -e "${YELLOW}Hardware reminder:${NC}"
