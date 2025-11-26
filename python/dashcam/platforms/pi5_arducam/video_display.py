@@ -54,7 +54,12 @@ class VideoDisplay:
         # Preallocated framebuffer conversion buffer (allocated on start)
         self._rgb565 = None
         self._fb_frame_bytes = None
-        
+
+        # Framebuffer format detection
+        self._fb_bpp = self._detect_fb_format()
+        self._use_rgb565 = (self._fb_bpp == 16)
+        self.logger.info(f"Framebuffer: {self._fb_bpp}-bit ({'RGB565' if self._use_rgb565 else 'BGRA32'})")
+
         # Performance tracking
         self.last_fps_calc = time.time()
         self.fps_frame_count = 0
@@ -102,7 +107,17 @@ class VideoDisplay:
         self.font = None
         self.font_small = None
         self._load_fonts()
-        
+
+
+    def _detect_fb_format(self):
+        """Detect framebuffer bits per pixel"""
+        try:
+            with open('/sys/class/graphics/fb0/bits_per_pixel', 'r') as f:
+                return int(f.read().strip())
+        except:
+            # Default to 32-bit on Pi 5
+            return 32
+
     def _load_fonts(self):
         """Load fonts for overlay text"""
         try:
@@ -569,42 +584,39 @@ class VideoDisplay:
         self.hw_transform_applied = bool(applied)
     
     def _write_frame(self, frame: np.ndarray):
-        """Write frame to framebuffer as 16-bit RGB565
-        
-        OPTIMIZED VERSION: Uses vectorized NumPy operations for 3-5x faster RGB565 packing.
-        """
+        """Write frame to framebuffer in native format"""
         try:
-            # 1) Resize to framebuffer resolution if needed using a fast
-            # nearest-neighbor NumPy sampler to avoid PIL allocations.
             t_resize_start = time.time()
             if frame.shape[0] != self.height or frame.shape[1] != self.width:
                 frame = self._resize_nn(frame, self.width, self.height)
             t_resize_end = time.time()
 
-            # 2) Ensure 8-bit channels
             if frame.dtype != np.uint8:
                 frame = frame.astype(np.uint8)
 
-            # 3) OPTIMIZED RGB565 packing - Single vectorized expression
             t_pack_start = time.time()
             
-            # Convert entire frame to uint16 once (much faster than 3 separate conversions)
-            frame_u16 = frame.astype(np.uint16)
-            
-            # Extract channels as uint16 views
-            r = frame_u16[:, :, 0]
-            g = frame_u16[:, :, 1]
-            b = frame_u16[:, :, 2]
-            
-            # Single vectorized RGB565 packing expression
-            self._rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | ((b & 0xF8) >> 3)
+            if self._use_rgb565:
+                # RGB565 path (16-bit displays)
+                r = frame[:, :, 0].astype(np.uint16)
+                g = frame[:, :, 1].astype(np.uint16)
+                b = frame[:, :, 2].astype(np.uint16)
+                rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | ((b & 0xF8) >> 3)
+                buf = rgb565.astype('<u2').tobytes()
+            else:
+                # BGRA32 path (32-bit displays) - Pi 5 default
+                # Create BGRA array (Blue, Green, Red, Alpha)
+                bgra = np.empty((self.height, self.width, 4), dtype=np.uint8)
+                bgra[:, :, 0] = frame[:, :, 2]  # B
+                bgra[:, :, 1] = frame[:, :, 1]  # G
+                bgra[:, :, 2] = frame[:, :, 0]  # R
+                bgra[:, :, 3] = 255              # A
+                buf = bgra.tobytes()
             
             t_pack_end = time.time()
 
-            # 4) Write to framebuffer (convert to little-endian bytes)
             t_fb_start = time.time()
             try:
-                buf = self._rgb565.astype('<u2').tobytes()
                 if getattr(self, 'fb_file', None) is not None:
                     self.fb_file.seek(0)
                     self.fb_file.write(buf)
@@ -616,7 +628,6 @@ class VideoDisplay:
                 self.logger.debug("Framebuffer write failed; skipping frame write")
             t_fb_end = time.time()
 
-            # Record profiling breakdown
             if self._prof_enabled:
                 self._prof_resize += (t_resize_end - t_resize_start) * 1000.0
                 self._prof_pack += (t_pack_end - t_pack_start) * 1000.0
