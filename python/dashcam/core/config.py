@@ -141,6 +141,21 @@ class Config:
         self.start_recording_speed_mph = 5.0  # Start recording above 5 mph
         self.stop_recording_delay_seconds = 120  # Keep recording 2 min after stopping
         
+        # GPS-based time synchronization
+        self.gps_time_sync_enabled = True  # Enable GPS time synchronization
+        self.gps_time_sync_on_startup = True  # Set system time from GPS on startup
+        self.gps_time_sync_update_interval = 300.0  # Update every 5 minutes
+        self.gps_time_sync_require_fix = True  # Only sync if we have valid fix
+        
+        # PPS (Pulse Per Second) support for precise timing
+        self.gps_pps_enabled = False  # Enable if PPS pin is wired (requires hardware)
+        self.gps_pps_gpio = 27  # GPIO pin for PPS signal (check your wiring)
+        self.gps_pps_device = "/dev/pps0"  # PPS device for chrony/ntpd
+        
+        # System time source configuration
+        self.ntp_service = "auto"  # "auto", "chrony", "ntpd", "systemd-timesyncd"
+        self.gps_chrony_refclock = True  # Add GPS as refclock to chrony (if available)
+        
         # ==========================================
         # CAN Bus Configuration
         # ==========================================

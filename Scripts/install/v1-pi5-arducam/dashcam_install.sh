@@ -211,7 +211,8 @@ apt install -y \
     screen \
     rsync \
     libcap-dev \
-    i2c-tools
+    i2c-tools \
+    chrony
 
 echo -e "${GREEN}✓ System packages installed${NC}"
 
