@@ -584,7 +584,7 @@ class VideoDisplay:
         self.hw_transform_applied = bool(applied)
     
     def _write_frame(self, frame: np.ndarray):
-        """Write frame to framebuffer in native format"""
+        """Write frame to framebuffer - try 32-bit XRGB8888 first"""
         try:
             t_resize_start = time.time()
             if frame.shape[0] != self.height or frame.shape[1] != self.width:
@@ -596,22 +596,14 @@ class VideoDisplay:
 
             t_pack_start = time.time()
             
-            if self._use_rgb565:
-                # RGB565 path (16-bit displays)
-                r = frame[:, :, 0].astype(np.uint16)
-                g = frame[:, :, 1].astype(np.uint16)
-                b = frame[:, :, 2].astype(np.uint16)
-                rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | ((b & 0xF8) >> 3)
-                buf = rgb565.astype('<u2').tobytes()
-            else:
-                # BGRA32 path (32-bit displays) - Pi 5 default
-                # Create BGRA array (Blue, Green, Red, Alpha)
-                bgra = np.empty((self.height, self.width, 4), dtype=np.uint8)
-                bgra[:, :, 0] = frame[:, :, 2]  # B
-                bgra[:, :, 1] = frame[:, :, 1]  # G
-                bgra[:, :, 2] = frame[:, :, 0]  # R
-                bgra[:, :, 3] = 255              # A
-                buf = bgra.tobytes()
+            # Try writing XRGB8888 (32-bit) - much faster than RGB565
+            # Format: 0xXXRRGGBB where XX is padding
+            xrgb = np.zeros((self.height, self.width, 4), dtype=np.uint8)
+            xrgb[:, :, 0] = 0                # X (padding)
+            xrgb[:, :, 1] = frame[:, :, 0]  # R
+            xrgb[:, :, 2] = frame[:, :, 1]  # G
+            xrgb[:, :, 3] = frame[:, :, 2]  # B
+            buf = xrgb.tobytes()
             
             t_pack_end = time.time()
 
@@ -625,7 +617,7 @@ class VideoDisplay:
                     with open(self.fb_device, 'wb') as f:
                         f.write(buf)
             except Exception:
-                self.logger.debug("Framebuffer write failed; skipping frame write")
+                self.logger.debug("Framebuffer write failed; skipping frame")
             t_fb_end = time.time()
 
             if self._prof_enabled:
@@ -635,6 +627,7 @@ class VideoDisplay:
 
         except Exception as e:
             self.logger.error(f"Failed to write frame: {e}")
+
 
     def _resize_nn(self, frame: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
         """Nearest-neighbor resize using NumPy indexing. Returns a new array
