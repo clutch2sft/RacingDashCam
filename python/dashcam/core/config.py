@@ -117,7 +117,7 @@ class Config:
         # Recording indicator
         self.rec_indicator_text = "⬤ REC"
         self.rec_indicator_color = (255, 0, 0)  # Red
-        self.rec_indicator_blink = True
+        self.rec_indicator_blink = False
         self.rec_indicator_blink_rate = 1.0  # Seconds
         
         # ==========================================
