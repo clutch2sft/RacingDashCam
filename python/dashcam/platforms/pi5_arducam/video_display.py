@@ -7,6 +7,7 @@ import time
 import logging
 import os
 import numpy as np
+from numba import jit
 from datetime import datetime
 from threading import Thread, Event, Lock
 from typing import Optional
@@ -29,7 +30,22 @@ def show_cursor():
     except Exception:
         pass
 
-
+@jit(nopython=True, cache=True, parallel=False)
+def pack_rgb565_jit(frame, output):
+    """JIT-compiled RGB565 packing"""
+    height, width = frame.shape[0], frame.shape[1]
+    
+    for y in range(height):
+        for x in range(width):
+            r = frame[y, x, 0]
+            g = frame[y, x, 1]
+            b = frame[y, x, 2]
+            
+            r5 = (r >> 3) & 0x1F
+            g6 = (g >> 2) & 0x3F
+            b5 = (b >> 3) & 0x1F
+            
+            output[y, x] = (r5 << 11) | (g6 << 5) | b5
 class VideoDisplay:
     """Manages video display with overlay on framebuffer"""
     
@@ -596,22 +612,10 @@ class VideoDisplay:
 
             t_pack_start = time.time()
             
-            if self._use_rgb565:
-                # RGB565 path (16-bit displays)
-                r = frame[:, :, 0].astype(np.uint16)
-                g = frame[:, :, 1].astype(np.uint16)
-                b = frame[:, :, 2].astype(np.uint16)
-                rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | ((b & 0xF8) >> 3)
-                buf = rgb565.astype('<u2').tobytes()
-            else:
-                # BGRA32 path (32-bit displays) - Pi 5 default
-                # Create BGRA array (Blue, Green, Red, Alpha)
-                bgra = np.empty((self.height, self.width, 4), dtype=np.uint8)
-                bgra[:, :, 0] = frame[:, :, 2]  # B
-                bgra[:, :, 1] = frame[:, :, 1]  # G
-                bgra[:, :, 2] = frame[:, :, 0]  # R
-                bgra[:, :, 3] = 255              # A
-                buf = bgra.tobytes()
+            if self._rgb565 is None:
+                self._rgb565 = np.zeros((self.height, self.width), dtype=np.uint16)
+            
+            pack_rgb565_jit(frame, self._rgb565)
             
             t_pack_end = time.time()
 
