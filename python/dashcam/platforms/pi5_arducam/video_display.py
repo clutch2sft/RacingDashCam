@@ -124,6 +124,7 @@ class VideoDisplay:
         self.font_small = None
         self._load_fonts()
 
+        self._blended_overlay = None  # Cached pre-blended overlay mask
 
     def _detect_fb_format(self):
         """Detect framebuffer bits per pixel"""
@@ -297,7 +298,6 @@ class VideoDisplay:
                         with self.gps_lock:
                             cs = self.current_speed
 
-                        # Calculate current rec state (stateless blink)
                         rec_state = False
                         if self.recording:
                             if not self.config.rec_indicator_blink:
@@ -318,9 +318,12 @@ class VideoDisplay:
                             t_or_start = time.time()
                             try:
                                 self._overlay_rgba = self._render_overlay_rgba()
+                                # Pre-compute blended overlay regions when overlay changes
+                                self._blended_overlay = self._precompute_blend_mask(self._overlay_rgba)
                             except Exception as e:
                                 self.logger.debug(f"Overlay render failed: {e}")
                                 self._overlay_rgba = None
+                                self._blended_overlay = None
                             t_or_end = time.time()
                             if self._prof_enabled:
                                 self._prof_overlay_render += (t_or_end - t_or_start) * 1000.0
@@ -329,15 +332,16 @@ class VideoDisplay:
                             self._overlay_last_speed = cs
                             self._overlay_last_rec_state = rec_state
 
-                    # Composite overlay (fast NumPy blend)
-                    try:
-                        t_bl_start = time.time()
-                        frame = self._blend_overlay(frame, self._overlay_rgba)
-                        t_bl_end = time.time()
-                        if self._prof_enabled:
-                            self._prof_blend += (t_bl_end - t_bl_start) * 1000.0
-                    except Exception as e:
-                        self.logger.debug(f"Overlay blend failed: {e}")
+                    # Fast blend using pre-computed mask
+                    if self._blended_overlay is not None:
+                        try:
+                            t_bl_start = time.time()
+                            frame = self._apply_blended_overlay(frame, self._blended_overlay)
+                            t_bl_end = time.time()
+                            if self._prof_enabled:
+                                self._prof_blend += (t_bl_end - t_bl_start) * 1000.0
+                        except Exception as e:
+                            self.logger.debug(f"Overlay blend failed: {e}")
                 
                 # Write to framebuffer
                 t_w_start = time.time()
@@ -404,7 +408,63 @@ class VideoDisplay:
                 time.sleep(sleep_time)
             elif self.config.log_dropped_frames and elapsed > frame_time * 1.5:
                 self.logger.warning(f"Display frame took {elapsed*1000:.1f}ms (target: {frame_time*1000:.1f}ms)")
-    
+
+    def _precompute_blend_mask(self, overlay_rgba):
+        """Pre-compute overlay blend regions (only when overlay changes)"""
+        if overlay_rgba is None:
+            return None
+        
+        try:
+            alpha = overlay_rgba[:, :, 3]
+            if not np.any(alpha):
+                return None
+
+            # Find bounding box of non-transparent regions
+            ys, xs = np.where(alpha > 0)
+            y0, y1 = ys.min(), ys.max()
+            x0, x1 = xs.min(), xs.max()
+
+            # Store the overlay region and blend parameters
+            o_sub = overlay_rgba[y0:y1+1, x0:x1+1]
+            
+            return {
+                'bbox': (y0, y1, x0, x1),
+                'overlay': o_sub,
+                'alpha': o_sub[:, :, 3].astype(np.uint16),
+                'rgb': o_sub[:, :, :3].astype(np.uint16)
+            }
+        except Exception:
+            return None
+
+    def _apply_blended_overlay(self, frame, blend_mask):
+        """Apply pre-computed overlay blend (fast path)"""
+        if blend_mask is None:
+            return frame
+        
+        try:
+            y0, y1, x0, x1 = blend_mask['bbox']
+            o_rgb = blend_mask['rgb']
+            o_a = blend_mask['alpha']
+            
+            # Extract frame subregion
+            f_sub = frame[y0:y1+1, x0:x1+1].astype(np.uint16)
+            
+            # Fast integer blend
+            a_exp = o_a[:, :, None].astype(np.uint32)
+            o_exp = o_rgb.astype(np.uint32)
+            f_exp = f_sub.astype(np.uint32)
+            
+            out_sub = (a_exp * o_exp + (255 - a_exp) * f_exp + 127) // 255
+            out_sub = np.clip(out_sub, 0, 255).astype(np.uint8)
+            
+            # Write back
+            frame[y0:y1+1, x0:x1+1] = out_sub
+            return frame
+            
+        except Exception:
+            return frame
+
+
     def _add_overlay(self, frame: np.ndarray) -> np.ndarray:
         """Legacy per-frame overlay renderer kept for compatibility but
         not used by the main loop. New code renders overlay into a cached
