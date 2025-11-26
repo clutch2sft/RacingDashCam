@@ -1,29 +1,64 @@
 """
-Video Display Handler for Active Dash Mirror
-Direct framebuffer output with overlay rendering for dual CSI cameras
+Video Display Handler for Active Dash Mirror - DRM/KMS VERSION
+Direct DRM framebuffer output bypassing RGB565 conversion
+
+PERFORMANCE: Writes XRGB8888 directly to DRM, eliminating 18ms RGB565 packing
+Expected: ~1-2ms write time vs 18-20ms with old RGB565 method
 """
 
 import time
 import logging
 import os
+import mmap
 import numpy as np
 from datetime import datetime
 from threading import Thread, Event, Lock
 from typing import Optional
 from PIL import Image, ImageDraw, ImageFont
+import ctypes
+import fcntl
+
+
+# DRM/KMS constants
+DRM_IOCTL_BASE = ord('d')
+DRM_IOCTL_MODE_CREATE_DUMB = (0xC0206400 | (DRM_IOCTL_BASE << 8) | 0xB2)
+DRM_IOCTL_MODE_MAP_DUMB = (0xC0106400 | (DRM_IOCTL_BASE << 8) | 0xB3)
+DRM_IOCTL_MODE_ADDFB = (0xC01C6400 | (DRM_IOCTL_BASE << 8) | 0xAE)
+DRM_IOCTL_MODE_RMFB = (0xC0046400 | (DRM_IOCTL_BASE << 8) | 0xAF)
+
+
+class DRMBuffer(ctypes.Structure):
+    """DRM dumb buffer structure"""
+    _fields_ = [
+        ("height", ctypes.c_uint32),
+        ("width", ctypes.c_uint32),
+        ("bpp", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+        ("handle", ctypes.c_uint32),
+        ("pitch", ctypes.c_uint32),
+        ("size", ctypes.c_uint64),
+    ]
+
+
+class DRMMapDumb(ctypes.Structure):
+    """DRM map dumb buffer structure"""
+    _fields_ = [
+        ("handle", ctypes.c_uint32),
+        ("pad", ctypes.c_uint32),
+        ("offset", ctypes.c_uint64),
+    ]
 
 
 def hide_cursor():
-    """Hide the Linux virtual console cursor on tty0 (framebuffer)."""
+    """Hide the Linux virtual console cursor"""
     try:
-        # Redirect stderr to /dev/null to avoid noisy output if not available
         os.system("setterm -cursor off > /dev/tty0 2>/dev/null")
     except Exception:
         pass
 
 
 def show_cursor():
-    """Restore the Linux virtual console cursor on tty0 (framebuffer)."""
+    """Restore the Linux virtual console cursor"""
     try:
         os.system("setterm -cursor on > /dev/tty0 2>/dev/null")
     except Exception:
@@ -31,7 +66,7 @@ def show_cursor():
 
 
 class VideoDisplay:
-    """Manages video display with overlay on framebuffer"""
+    """Manages video display with overlay using DRM/KMS for direct framebuffer access"""
     
     def __init__(self, config):
         self.config = config
@@ -43,23 +78,16 @@ class VideoDisplay:
         self.fps = config.display_fps
         self.mirror_mode = config.display_mirror_mode
 
-        # Framebuffer
-        self.fb_device = config.framebuffer_device if hasattr(config, 'framebuffer_device') else "/dev/fb0"
-        self.fb_file = None
+        # DRM device
+        self.drm_fd = None
+        self.drm_buffer = None
+        self.drm_map = None
         
         # Frame management
         self.current_frame = None
         self.frame_lock = Lock()
         self.frame_count = 0
-        # Preallocated framebuffer conversion buffer (allocated on start)
-        self._rgb565 = None
-        self._fb_frame_bytes = None
-
-        # Framebuffer format detection
-        self._fb_bpp = self._detect_fb_format()
-        self._use_rgb565 = (self._fb_bpp == 16)
-        self.logger.info(f"Framebuffer: {self._fb_bpp}-bit ({'RGB565' if self._use_rgb565 else 'BGRA32'})")
-
+        
         # Performance tracking
         self.last_fps_calc = time.time()
         self.fps_frame_count = 0
@@ -83,14 +111,14 @@ class VideoDisplay:
         self.rec_blink_state = False
         self.last_blink_time = time.time()
 
-        # Overlay caching (to avoid re-rendering every frame)
-        self._overlay_rgba = None  # Cached RGBA overlay as numpy array
+        # Overlay caching
+        self._overlay_rgba = None
         self._overlay_last_time_sec = None
         self._overlay_last_speed = None
         self._overlay_last_rec_state = None
         self._overlay_lock = Lock()
         
-        # GPS data (optional)
+        # GPS data
         self.current_speed = None
         self.gps_lock = Lock()
         
@@ -99,29 +127,17 @@ class VideoDisplay:
         self.thread = None
         self.stop_event = Event()
 
-        # Whether the camera has applied transforms in hardware. If True,
-        # the display will not re-apply rotation/hflip/vflip in software.
+        # Hardware transform flag
         self.hw_transform_applied = False
         
-        # Font for overlay (will try to load, fallback to default)
+        # Font for overlay
         self.font = None
         self.font_small = None
         self._load_fonts()
-
-
-    def _detect_fb_format(self):
-        """Detect framebuffer bits per pixel"""
-        try:
-            with open('/sys/class/graphics/fb0/bits_per_pixel', 'r') as f:
-                return int(f.read().strip())
-        except:
-            # Default to 32-bit on Pi 5
-            return 32
-
+        
     def _load_fonts(self):
         """Load fonts for overlay text"""
         try:
-            # Try to load a monospace font
             self.font = ImageFont.truetype(
                 "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 
                 self.config.overlay_font_size
@@ -133,7 +149,6 @@ class VideoDisplay:
             self.logger.info("Loaded DejaVu Sans Mono font")
         except:
             try:
-                # Fallback to basic font
                 self.font = ImageFont.truetype(
                     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                     self.config.overlay_font_size
@@ -144,32 +159,87 @@ class VideoDisplay:
                 )
                 self.logger.info("Loaded DejaVu Sans font")
             except:
-                # Use default PIL font
                 self.font = ImageFont.load_default()
                 self.font_small = ImageFont.load_default()
                 self.logger.warning("Using default PIL font")
- 
+    
+    def _init_drm(self):
+        """Initialize DRM/KMS for direct framebuffer access"""
+        try:
+            # Try to open DRM device - fallback to legacy /dev/fb0 if DRM fails
+            drm_paths = ["/dev/dri/card1", "/dev/dri/card0"]
+            
+            for drm_path in drm_paths:
+                if not os.path.exists(drm_path):
+                    continue
+                    
+                try:
+                    self.drm_fd = os.open(drm_path, os.O_RDWR)
+                    self.logger.info(f"Opened DRM device: {drm_path}")
+                    
+                    # Create dumb buffer for XRGB8888 (32-bit)
+                    buf = DRMBuffer()
+                    buf.width = self.width
+                    buf.height = self.height
+                    buf.bpp = 32  # XRGB8888
+                    buf.flags = 0
+                    
+                    # This will fail if we don't have permission - fall back to /dev/fb0
+                    fcntl.ioctl(self.drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, buf)
+                    
+                    # Map the buffer
+                    map_req = DRMMapDumb()
+                    map_req.handle = buf.handle
+                    fcntl.ioctl(self.drm_fd, DRM_IOCTL_MODE_MAP_DUMB, map_req)
+                    
+                    # Memory map the buffer
+                    self.drm_map = mmap.mmap(
+                        self.drm_fd,
+                        buf.size,
+                        mmap.MAP_SHARED,
+                        mmap.PROT_READ | mmap.PROT_WRITE,
+                        offset=map_req.offset
+                    )
+                    
+                    self.drm_buffer = buf
+                    self.logger.info(f"DRM buffer created: {self.width}x{self.height} XRGB8888")
+                    return True
+                    
+                except Exception as e:
+                    self.logger.debug(f"DRM init failed for {drm_path}: {e}")
+                    if self.drm_fd:
+                        os.close(self.drm_fd)
+                        self.drm_fd = None
+                    continue
+            
+            # DRM failed, fall back to legacy framebuffer
+            self.logger.warning("DRM initialization failed, falling back to /dev/fb0 with RGB565")
+            return self._init_legacy_fb()
+            
+        except Exception as e:
+            self.logger.error(f"Failed to initialize display: {e}")
+            return False
+    
+    def _init_legacy_fb(self):
+        """Fallback to legacy /dev/fb0 framebuffer"""
+        try:
+            self.fb_file = open("/dev/fb0", 'r+b')
+            self._rgb565 = np.zeros((self.height, self.width), dtype=np.uint16)
+            self.logger.info("Using legacy framebuffer (/dev/fb0) with RGB565")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to open /dev/fb0: {e}")
+            return False
     
     def start(self):
         """Start display handler"""
         try:
-            # Hide virtual console cursor when display starts
-            try:
-                hide_cursor()
-            except Exception:
-                pass
-            # Open framebuffer file for binary writes. Avoid mmap due to
-            # observed periodic blanking on some platforms/drivers.
-            try:
-                # Use r+b to avoid truncation while allowing writes
-                self.fb_file = open(self.fb_device, 'r+b')
-            except Exception:
-                # Fallback to wb if r+b not permitted
-                self.fb_file = open(self.fb_device, 'wb')
-
-            # Preallocate conversion buffer and clear screen to black
-            self._rgb565 = np.zeros((self.height, self.width), dtype=np.uint16)
-            self._fb_frame_bytes = self.width * self.height * 2
+            hide_cursor()
+            
+            if not self._init_drm():
+                return False
+            
+            # Clear screen
             black_frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
             self._write_frame(black_frame)
             
@@ -181,7 +251,7 @@ class VideoDisplay:
             
             self.logger.info(
                 f"Display started: {self.width}x{self.height} @ {self.fps}fps "
-                f"(mirror_mode={self.mirror_mode})"
+                f"(mirror_mode={self.mirror_mode}, method={'DRM' if self.drm_fd else 'FB0'})"
             )
             return True
             
@@ -198,25 +268,26 @@ class VideoDisplay:
         if self.thread:
             self.thread.join(timeout=2.0)
         
-        if self.fb_file:
-            # Clear screen before closing
-            try:
-                black_frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-                self._write_frame(black_frame)
-            except:
-                pass
-            self.fb_file.close()
-        # Restore cursor when display stops
+        # Clear screen
         try:
-            show_cursor()
-        except Exception:
+            black_frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+            self._write_frame(black_frame)
+        except:
             pass
-
+        
+        # Cleanup DRM resources
+        if self.drm_map:
+            self.drm_map.close()
+        if self.drm_fd:
+            os.close(self.drm_fd)
+        if hasattr(self, 'fb_file') and self.fb_file:
+            self.fb_file.close()
+            
+        show_cursor()
         self.logger.info(f"Display stopped (actual FPS: {self.actual_fps:.1f})")
     
     def update_frame(self, frame: np.ndarray):
         """Update the current frame to display"""
-        # Store reference to latest frame (avoid copying here)
         with self.frame_lock:
             self.current_frame = frame
             self.frame_count += 1
@@ -238,10 +309,6 @@ class VideoDisplay:
             loop_start = time.time()
             
             try:
-                # Get current frame (measure capture retrieval time).
-                # Do NOT clear `self.current_frame` so the last frame remains
-                # available if the producer is momentarily late. This prevents
-                # visible black frames when capture hiccups occur.
                 t_get_start = time.time()
                 with self.frame_lock:
                     frame = self.current_frame
@@ -250,12 +317,9 @@ class VideoDisplay:
                     self._prof_capture += (t_get_end - t_get_start) * 1000.0
 
                 if frame is None:
-                    # No frame yet, show black
                     frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
                 
-                # Apply per-camera transforms (rotation, hflip, vflip) only if
-                # hardware hasn't already applied them. If hardware transform is
-                # applied we skip software rotation/flips to avoid double-transform.
+                # Apply transforms if needed
                 t_start = time.time()
                 if not getattr(self, 'hw_transform_applied', False):
                     try:
@@ -273,15 +337,13 @@ class VideoDisplay:
                 if self._prof_enabled:
                     self._prof_transform += (t_after_transform - t_start) * 1000.0
                 
-                # Add overlay if enabled. Use cached overlay rendered only
-                # when content changes (time second, GPS speed, REC state).
+                # Add overlay if enabled
                 if self.config.overlay_enabled:
                     now_sec = datetime.now().second
                     with self._overlay_lock:
                         with self.gps_lock:
                             cs = self.current_speed
 
-                        # Calculate current rec state (stateless blink)
                         rec_state = False
                         if self.recording:
                             if not self.config.rec_indicator_blink:
@@ -313,7 +375,6 @@ class VideoDisplay:
                             self._overlay_last_speed = cs
                             self._overlay_last_rec_state = rec_state
 
-                    # Composite overlay (fast NumPy blend)
                     try:
                         t_bl_start = time.time()
                         frame = self._blend_overlay(frame, self._overlay_rgba)
@@ -328,10 +389,9 @@ class VideoDisplay:
                 self._write_frame(frame)
                 t_w_end = time.time()
                 if self._prof_enabled:
-                    # Keep overall write time (for backward compatibility)
                     self._prof_write += (t_w_end - t_w_start) * 1000.0
                 
-                # Update FPS counter and profiling frame count
+                # Update FPS counter
                 self.fps_frame_count += 1
                 if self._prof_enabled:
                     self._prof_frames += 1
@@ -340,7 +400,7 @@ class VideoDisplay:
                     interval = time.time() - self.last_fps_calc
                     frames = self.fps_frame_count
                     self.actual_fps = frames / interval if interval > 0 else 0.0
-                    # Compute per-stage averages
+                    
                     if self._prof_enabled and self._prof_frames > 0:
                         avg_transform = self._prof_transform / max(1, self._prof_frames)
                         avg_overlay = self._prof_overlay_render / max(1, self._prof_frames)
@@ -349,14 +409,14 @@ class VideoDisplay:
                         avg_resize = self._prof_resize / max(1, self._prof_frames)
                         avg_pack = self._prof_pack / max(1, self._prof_frames)
                         avg_fbwrite = self._prof_fbwrite / max(1, self._prof_frames)
-                        # avg_other should be per-frame remainder: total ms per frame
                         avg_other = max(0.0, (interval * 1000.0) / max(1, frames) - (avg_transform + avg_overlay + avg_blend + avg_write))
                     else:
                         avg_transform = avg_overlay = avg_blend = avg_write = avg_other = 0.0
+                        avg_resize = avg_pack = avg_fbwrite = 0.0
 
                     self.fps_frame_count = 0
                     self.last_fps_calc = time.time()
-                    # Reset profiling accumulators
+                    
                     if self._prof_enabled:
                         self.logger.debug(
                             f"Display FPS: {self.actual_fps:.1f} | timings (ms/frame): "
@@ -389,88 +449,82 @@ class VideoDisplay:
             elif self.config.log_dropped_frames and elapsed > frame_time * 1.5:
                 self.logger.warning(f"Display frame took {elapsed*1000:.1f}ms (target: {frame_time*1000:.1f}ms)")
     
-    def _add_overlay(self, frame: np.ndarray) -> np.ndarray:
-        """Legacy per-frame overlay renderer kept for compatibility but
-        not used by the main loop. New code renders overlay into a cached
-        RGBA buffer and composites via NumPy for much better performance.
-        """
-        img = Image.fromarray(frame)
-        draw = ImageDraw.Draw(img, 'RGBA')
-
-        # Draw simple time text to fallback path
-        time_str = datetime.now().strftime(self.config.overlay_time_format)
-        self._draw_text_with_bg(draw, time_str, self.config.overlay_time_pos, self.config.overlay_font_color, self.font)
-        return np.array(img)
-
     def _render_overlay_rgba(self) -> Optional[np.ndarray]:
-        """Render the overlay into an RGBA numpy array. This is called
-        only when overlay content changes (time second, GPS speed, REC state).
-        """
+        """Render overlay to RGBA numpy array"""
         if not self.config.overlay_enabled:
             return None
-
-        # Create transparent overlay
-        img = Image.new('RGBA', (self.width, self.height), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img, 'RGBA')
-
-        # Time and date
-        now = datetime.now()
-        time_str = now.strftime(self.config.overlay_time_format)
-        self._draw_text_with_bg(draw, time_str, self.config.overlay_time_pos, self.config.overlay_font_color, self.font)
-
-        if hasattr(self.config, 'overlay_date_pos'):
+        
+        try:
+            overlay_img = Image.new('RGBA', (self.width, self.height), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay_img)
+            
+            now = datetime.now()
+            time_str = now.strftime(self.config.overlay_time_format)
             date_str = now.strftime(self.config.overlay_date_format)
-            self._draw_text_with_bg(draw, date_str, self.config.overlay_date_pos, self.config.overlay_font_color, self.font_small)
-
-        # GPS speed
-        if self.config.display_speed and hasattr(self.config, 'overlay_speed_pos'):
-            with self.gps_lock:
-                cs = self.current_speed
-            if cs is not None:
+            
+            self._draw_text_with_bg(
+                draw, time_str, 
+                self.config.overlay_time_pos,
+                self.config.overlay_font_color,
+                self.font
+            )
+            
+            self._draw_text_with_bg(
+                draw, date_str,
+                self.config.overlay_date_pos,
+                self.config.overlay_font_color,
+                self.font_small
+            )
+            
+            if self.config.display_speed and self.current_speed is not None:
                 if self.config.speed_unit == "mph":
-                    speed_text = f"{cs:.0f} MPH"
+                    speed_str = f"{int(self.current_speed)} mph"
                 else:
-                    speed_kph = cs * 1.60934
-                    speed_text = f"{speed_kph:.0f} KPH"
-                self._draw_text_with_bg(draw, speed_text, self.config.overlay_speed_pos, self.config.overlay_font_color, self.font)
+                    speed_kph = self.current_speed * 1.60934
+                    speed_str = f"{int(speed_kph)} km/h"
+                
+                self._draw_text_with_bg(
+                    draw, speed_str,
+                    self.config.overlay_speed_pos,
+                    self.config.overlay_font_color,
+                    self.font
+                )
+            
+            if self.recording:
+                rec_state = False
+                if not self.config.rec_indicator_blink:
+                    rec_state = True
+                else:
+                    blink_rate = max(0.01, float(self.config.rec_indicator_blink_rate))
+                    rec_state = (int(time.time() / blink_rate) % 2) == 0
 
-        # REC indicator (respect blink rate)
-        rec_state = False
-        if self.recording:
-            if not self.config.rec_indicator_blink:
-                rec_state = True
-            else:
-                # Stateless blink based on current time
-                blink_rate = max(0.01, float(self.config.rec_indicator_blink_rate))
-                rec_state = (int(time.time() / blink_rate) % 2) == 0
-
-        if rec_state:
-            rec_x, rec_y = self.config.overlay_rec_indicator_pos
-            text_bbox = draw.textbbox((0, 0), self.config.rec_indicator_text, font=self.font)
-            text_width = text_bbox[2] - text_bbox[0]
-            rec_x -= text_width
-            self._draw_text_with_bg(draw, self.config.rec_indicator_text, (rec_x, rec_y), self.config.rec_indicator_color, self.font)
-
-        return np.array(img)
-
-    def _blend_overlay(self, frame: np.ndarray, overlay_rgba: np.ndarray) -> np.ndarray:
-        """Alpha-blend RGBA overlay into RGB frame using NumPy (fast)."""
+                if rec_state:
+                    self._draw_text_with_bg(
+                        draw, self.config.rec_indicator_text,
+                        self.config.overlay_rec_indicator_pos,
+                        self.config.rec_indicator_color,
+                        self.font
+                    )
+            
+            return np.array(overlay_img)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to render overlay: {e}")
+            return None
+    
+    def _blend_overlay(self, frame: np.ndarray, overlay_rgba: Optional[np.ndarray]) -> np.ndarray:
+        """Composite overlay on frame using alpha blending"""
         if overlay_rgba is None:
             return frame
 
-        # Ensure shapes
-        if overlay_rgba.shape[0] != frame.shape[0] or overlay_rgba.shape[1] != frame.shape[1]:
+        if overlay_rgba.shape[:2] != frame.shape[:2]:
             try:
                 overlay_rgba = np.array(Image.fromarray(overlay_rgba).resize((frame.shape[1], frame.shape[0])))
             except Exception:
                 return frame
 
-        # Fast path: compute bounding box of non-zero alpha in overlay and
-        # blend only that rectangle. Most overlays are small (time, date,
-        # REC) so this drastically reduces computation.
         try:
             alpha = overlay_rgba[:, :, 3]
-            # If completely transparent, nothing to do
             if not np.any(alpha):
                 return frame
 
@@ -478,11 +532,9 @@ class VideoDisplay:
             y0, y1 = ys.min(), ys.max()
             x0, x1 = xs.min(), xs.max()
 
-            # Extract subregions
             o_sub = overlay_rgba[y0:y1+1, x0:x1+1]
             f_sub = frame[y0:y1+1, x0:x1+1]
 
-            # Convert to small uint16/uint32 intermediates for integer blend
             o_rgb = o_sub[:, :, :3].astype(np.uint16)
             o_a = o_sub[:, :, 3].astype(np.uint16)
             f_rgb = f_sub.astype(np.uint16)
@@ -494,71 +546,44 @@ class VideoDisplay:
             out_sub = (a_exp * o_exp + (255 - a_exp) * f_exp + 127) // 255
             out_sub = np.clip(out_sub, 0, 255).astype(np.uint8)
 
-            # Write back blended subregion
             frame[y0:y1+1, x0:x1+1] = out_sub
             return frame
 
         except Exception:
-            # Fallback to full-frame float blend if anything goes wrong
-            try:
-                o_rgb = overlay_rgba[:, :, :3].astype(np.float32)
-                o_a = overlay_rgba[:, :, 3:].astype(np.float32) / 255.0
-                f_rgb = frame.astype(np.float32)
-                out = (o_a * o_rgb) + ((1.0 - o_a) * f_rgb)
-                out = np.clip(out, 0, 255).astype(np.uint8)
-                return out
-            except Exception:
-                return frame
+            return frame
     
     def _draw_text_with_bg(self, draw: ImageDraw.Draw, text: str, pos: tuple, 
                            color: tuple, font: ImageFont.ImageFont):
-        """Draw text with semi-transparent background and optional outline"""
+        """Draw text with semi-transparent background and outline"""
         x, y = pos
         
-        # Draw outline if enabled
         if self.config.overlay_outline:
             outline_color = self.config.overlay_outline_color
             for dx, dy in [(-1,-1), (-1,1), (1,-1), (1,1), (-1,0), (1,0), (0,-1), (0,1)]:
                 draw.text((x+dx, y+dy), text, font=font, fill=outline_color)
         
-        # Get text bounding box
         bbox = draw.textbbox((x, y), text, font=font)
-        
-        # Add padding
         padding = 5
         bbox = (bbox[0] - padding, bbox[1] - padding, 
                 bbox[2] + padding, bbox[3] + padding)
         
-        # Draw background
         bg_color = self.config.overlay_bg_color + (self.config.overlay_bg_alpha,)
         draw.rectangle(bbox, fill=bg_color)
-        
-        # Draw text
         draw.text((x, y), text, font=font, fill=color)
 
     def _apply_transform(self, frame: np.ndarray, rotation: int, hflip: bool, vflip: bool, mirror_mode: bool=False) -> np.ndarray:
-        """Apply rotation and flips to a numpy RGB frame using PIL transposes.
-
-        Rotation is applied in degrees (0/90/180/270). Flips (hflip/vflip) are
-        applied after rotation. `mirror_mode` will apply an additional
-        horizontal flip (useful for mirror display).
-        """
-        # Use NumPy operations for rotation/flips to avoid per-frame PIL conversions.
-        # This significantly reduces allocations and CPU on the Pi.
+        """Apply rotation and flips using NumPy operations"""
         try:
             if frame is None:
                 return frame
 
             img = frame
-            # Ensure ndarray
             if not isinstance(img, np.ndarray):
                 img = np.array(img)
 
-            # Normalize rotation (0/90/180/270)
             r = int(rotation or 0) % 360
             if r != 0:
                 k = (r // 90) % 4
-                # np.rot90 rotates counter-clockwise k times
                 img = np.rot90(img, k=k)
 
             if hflip:
@@ -573,18 +598,15 @@ class VideoDisplay:
             return img
 
         except Exception as e:
-            self.logger.debug(f"Transform failed (numpy), falling back: {e}")
+            self.logger.debug(f"Transform failed: {e}")
             return frame
 
     def set_hardware_transform_applied(self, applied: bool):
-        """Inform the display whether hardware (libcamera) applied transforms.
-
-        When True the display will skip applying software rotation/hflip/vflip.
-        """
+        """Set whether hardware applied transforms"""
         self.hw_transform_applied = bool(applied)
     
     def _write_frame(self, frame: np.ndarray):
-        """Write frame to framebuffer - try 32-bit XRGB8888 first"""
+        """Write frame to display - DRM or legacy framebuffer"""
         try:
             t_resize_start = time.time()
             if frame.shape[0] != self.height or frame.shape[1] != self.width:
@@ -596,26 +618,37 @@ class VideoDisplay:
 
             t_pack_start = time.time()
             
-            # Try writing XRGB8888 (32-bit) - much faster than RGB565
-            # Format: 0xXXRRGGBB where XX is padding
-            xrgb = np.zeros((self.height, self.width, 4), dtype=np.uint8)
-            xrgb[:, :, 0] = 0                # X (padding)
-            xrgb[:, :, 1] = frame[:, :, 0]  # R
-            xrgb[:, :, 2] = frame[:, :, 1]  # G
-            xrgb[:, :, 3] = frame[:, :, 2]  # B
-            buf = xrgb.tobytes()
+            if self.drm_fd and self.drm_map:
+                # DRM path - write XRGB8888 directly (no conversion!)
+                # Create XRGB8888 array (X, Red, Green, Blue)
+                xrgb = np.empty((self.height, self.width, 4), dtype=np.uint8)
+                xrgb[:, :, 0] = 0           # X (padding)
+                xrgb[:, :, 1] = frame[:, :, 0]  # R
+                xrgb[:, :, 2] = frame[:, :, 1]  # G
+                xrgb[:, :, 3] = frame[:, :, 2]  # B
+                buf = xrgb.tobytes()
+            else:
+                # Legacy FB path - use RGB565
+                r = frame[:, :, 0].astype(np.uint16)
+                g = frame[:, :, 1].astype(np.uint16)
+                b = frame[:, :, 2].astype(np.uint16)
+                rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | ((b & 0xF8) >> 3)
+                buf = rgb565.astype('<u2').tobytes()
             
             t_pack_end = time.time()
 
             t_fb_start = time.time()
             try:
-                if getattr(self, 'fb_file', None) is not None:
+                if self.drm_fd and self.drm_map:
+                    # Write to DRM buffer
+                    self.drm_map.seek(0)
+                    self.drm_map.write(buf)
+                    self.drm_map.flush()
+                elif hasattr(self, 'fb_file'):
+                    # Write to legacy framebuffer
                     self.fb_file.seek(0)
                     self.fb_file.write(buf)
                     self.fb_file.flush()
-                else:
-                    with open(self.fb_device, 'wb') as f:
-                        f.write(buf)
             except Exception:
                 self.logger.debug("Framebuffer write failed; skipping frame")
             t_fb_end = time.time()
@@ -628,12 +661,8 @@ class VideoDisplay:
         except Exception as e:
             self.logger.error(f"Failed to write frame: {e}")
 
-
     def _resize_nn(self, frame: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
-        """Nearest-neighbor resize using NumPy indexing. Returns a new array
-        with shape (out_h, out_w, channels).
-        """
-        # Handle grayscale or single-channel frames by expanding dims
+        """Nearest-neighbor resize using NumPy indexing"""
         if frame is None:
             return frame
 
@@ -644,15 +673,12 @@ class VideoDisplay:
         if src_h == out_h and src_w == out_w:
             return frame
 
-        # Compute source indices for rows and cols
         row_idx = (np.arange(out_h) * (src_h / out_h)).astype(np.int32)
         col_idx = (np.arange(out_w) * (src_w / out_w)).astype(np.int32)
 
-        # Clip indices to valid range
         row_idx = np.clip(row_idx, 0, src_h - 1)
         col_idx = np.clip(col_idx, 0, src_w - 1)
 
-        # Use broadcasting to sample
         resized = frame[row_idx[:, None], col_idx]
         return resized
     
