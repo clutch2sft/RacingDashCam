@@ -31,7 +31,7 @@ class Config:
         self.front_camera_width = 1920
         self.front_camera_height = 1080
         self.front_camera_fps = 15
-        self.front_camera_recording_enabled = False
+        self.front_camera_recording_enabled = True
         
         # Rear camera (Arducam HQ 12.3MP) - CSI CAM1 - Picamera2 index 1
         # Wide angle (158°) camera for rearview mirror display
@@ -40,7 +40,7 @@ class Config:
         self.rear_camera_width = 1920  # HQ camera can do 1920x1080
         self.rear_camera_height = 1080
         self.rear_camera_fps = 15  # Reduced default to 15fps for performance
-        self.rear_camera_recording_enabled = False  # Enable recording from rear
+        self.rear_camera_recording_enabled = True  # Enable recording from rear
         
         # Display configuration - shows rear camera on screen
         self.display_camera_index = 1  # Show rear camera (mirror view)
@@ -187,7 +187,7 @@ class Config:
         # ==========================================
         # Logging Configuration
         # ==========================================
-        self.log_level = "DEBUG"  # DEBUG, INFO, WARNING, ERROR
+        self.log_level = "INFO"  # DEBUG, INFO, WARNING, ERROR
         self.log_max_size = 10 * 1024 * 1024  # 10MB
         self.log_backup_count = 5
         self.log_to_console = True  # Also log to console
