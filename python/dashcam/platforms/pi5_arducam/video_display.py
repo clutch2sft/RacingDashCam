@@ -219,11 +219,13 @@ class VideoDisplay:
             loop_start = time.time()
             
             try:
-                # Get current frame (measure capture retrieval time)
+                # Get current frame (measure capture retrieval time).
+                # Do NOT clear `self.current_frame` so the last frame remains
+                # available if the producer is momentarily late. This prevents
+                # visible black frames when capture hiccups occur.
                 t_get_start = time.time()
                 with self.frame_lock:
                     frame = self.current_frame
-                    self.current_frame = None
                 t_get_end = time.time()
                 if self._prof_enabled:
                     self._prof_capture += (t_get_end - t_get_start) * 1000.0
