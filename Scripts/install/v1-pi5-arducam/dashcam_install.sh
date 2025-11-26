@@ -295,7 +295,8 @@ cd "$REPO_DIR/python"
     gps \
     pyserial \
     pyyaml \
-    python-can
+    python-can \
+    numba
 
 # Note: Picamera2, numpy, opencv accessed from system packages
 
