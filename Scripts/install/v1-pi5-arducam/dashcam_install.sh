@@ -115,9 +115,12 @@ echo ""
 echo -e "${GREEN}Step 3: Configuring system settings...${NC}"
 
 CONFIG_FILE="/boot/firmware/config.txt"
+CMDLINE_FILE="/boot/firmware/cmdline.txt"
+CMDLINE_DESIRED="quiet loglevel=0 splash vt.global_cursor_default=0 root=PARTUUID=5a50945f-02 rootfstype=ext4 fsck.repair=yes rootwait"
 
 # Backup config file
 cp "$CONFIG_FILE" "$CONFIG_FILE.backup.$(date +%Y%m%d_%H%M%S)"
+cp "$CMDLINE_FILE" "$CMDLINE_FILE.backup.$(date +%Y%m%d_%H%M%S)"
 
 # Check and update camera auto-detect
 if grep -q "^camera_auto_detect=1" "$CONFIG_FILE"; then
@@ -182,6 +185,16 @@ dtoverlay=mcp2515-can1,oscillator=12000000,interrupt=24,spimaxfrequency=2000000
 EOF
 
 echo -e "${GREEN}✓ System configuration complete${NC}"
+
+# Ensure cmdline.txt matches expected boot parameters for dashcam setup
+CURRENT_CMDLINE=$(tr -d '\n' < "$CMDLINE_FILE")
+if [ "$CURRENT_CMDLINE" != "$CMDLINE_DESIRED" ]; then
+    echo -e "${BLUE}Updating $CMDLINE_FILE...${NC}"
+    echo "$CMDLINE_DESIRED" > "$CMDLINE_FILE"
+    echo -e "${GREEN}✓ cmdline.txt updated${NC}"
+else
+    echo -e "${GREEN}✓ cmdline.txt already configured${NC}"
+fi
 
 echo ""
 echo -e "${GREEN}Step 4: Installing system packages...${NC}"
@@ -419,8 +432,161 @@ systemctl enable gpsd.socket
 
 echo -e "${GREEN}✓ GPSD configured${NC}"
 
+# Allow the invoking user to access the serial port for GPS
+if [ -n "$SUDO_USER" ]; then
+    usermod -a -G dialout $SUDO_USER
+    echo -e "${GREEN}✓ User added to dialout group${NC}"
+fi
+
 echo ""
-echo -e "${GREEN}Step 10: Configuring CAN bus...${NC}"
+echo -e "${GREEN}Step 10: Enabling GPS PPS time sync...${NC}"
+
+# Ensure PPS overlay on GPIO 18 is configured
+if grep -q "dtoverlay=pps-gpio,gpiopin=18" "$CONFIG_FILE"; then
+    echo -e "${GREEN}✓ PPS overlay already configured on GPIO 18${NC}"
+elif grep -q "dtoverlay=pps-gpio" "$CONFIG_FILE"; then
+    echo -e "${YELLOW}⚠ PPS overlay found with different GPIO, updating to GPIO 18...${NC}"
+    sed -i 's/dtoverlay=pps-gpio.*/dtoverlay=pps-gpio,gpiopin=18/' "$CONFIG_FILE"
+    echo -e "${GREEN}✓ Updated PPS to GPIO 18${NC}"
+else
+    echo -e "${BLUE}Adding PPS overlay to config.txt...${NC}"
+    if grep -q "enable_uart=1" "$CONFIG_FILE"; then
+        sed -i '/enable_uart=1/a\\n# PPS (Pulse Per Second) from GPS via GPIO 18\n# Waveshare LC29H ES HAT - PPS signal on GPIO 18\ndtoverlay=pps-gpio,gpiopin=18' "$CONFIG_FILE"
+    else
+        sed -i '/# End Active Dash Mirror Configuration/i \\n# PPS (Pulse Per Second) from GPS via GPIO 18\n# Waveshare LC29H ES HAT - PPS signal on GPIO 18\ndtoverlay=pps-gpio,gpiopin=18\n' "$CONFIG_FILE"
+    fi
+    echo -e "${GREEN}✓ PPS overlay added to config.txt${NC}"
+fi
+
+# Ensure pps-gpio loads at boot
+if ! grep -q "^pps-gpio$" /etc/modules; then
+    echo "pps-gpio" >> /etc/modules
+    echo -e "${GREEN}✓ pps-gpio added to /etc/modules${NC}"
+else
+    echo -e "${GREEN}✓ pps-gpio already in /etc/modules${NC}"
+fi
+
+# Install tools needed for PPS verification (if not already installed)
+apt-get install -y pps-tools lsof >/dev/null
+
+# Configure chrony for GPS + PPS
+mkdir -p /etc/chrony/conf.d
+cat > /etc/chrony/conf.d/gps.conf << 'CHRONYEOF'
+# GPS Time Reference via GPSD shared memory
+refclock SHM 0 refid GPS precision 1e-1 poll 4 minsamples 3
+
+# PPS (Pulse Per Second) for high-precision time
+refclock PPS /dev/pps0 refid PPS precision 1e-7 lock GPS
+CHRONYEOF
+
+if ! grep -q "confdir /etc/chrony/conf.d" /etc/chrony/chrony.conf; then
+    echo -e "${BLUE}Adding conf.d include to chrony.conf...${NC}"
+    {
+        echo ""
+        echo "# Include configuration files from conf.d"
+        echo "confdir /etc/chrony/conf.d"
+    } >> /etc/chrony/chrony.conf
+    echo -e "${GREEN}✓ Chrony conf.d include added${NC}"
+else
+    echo -e "${GREEN}✓ Chrony conf.d already configured${NC}"
+fi
+
+systemctl enable chrony
+
+# GPS/PPS status helper
+cat > /usr/local/bin/dashcam-gps-status << 'GPSSTATUSEOF'
+#!/bin/bash
+# Check GPS and time sync status
+
+echo "=========================================="
+echo "  GPS and Time Sync Status"
+echo "=========================================="
+echo ""
+
+echo "1. GPS Fix Status:"
+echo "----------------------------"
+if command -v cgps &> /dev/null; then
+    timeout 3 cgps -s 2>&1 | grep -E "Status|Sats|Time|Latitude|Longitude" || echo "GPS not responding"
+else
+    echo "cgps not installed"
+fi
+echo ""
+
+echo "2. GPSD Service:"
+echo "----------------------------"
+systemctl is-active gpsd && echo "✓ GPSD running" || echo "✗ GPSD not running"
+echo ""
+
+echo "3. PPS Hardware:"
+echo "----------------------------"
+if [ -e /dev/pps0 ]; then
+    echo "✓ /dev/pps0 exists"
+    ls -l /dev/pps0
+    
+    if lsmod | grep -q pps_gpio; then
+        echo "✓ pps-gpio module loaded"
+    else
+        echo "✗ pps-gpio module NOT loaded (reboot required)"
+    fi
+    
+    echo ""
+    echo "Testing PPS signal (3 seconds)..."
+    if timeout 3 sudo ppstest /dev/pps0 2>&1 | grep -q "assert.*sequence"; then
+        echo "✓ PPS pulses detected!"
+        timeout 3 sudo ppstest /dev/pps0 2>&1 | head -5
+    else
+        echo "✗ No PPS signals (GPS may need fix or reboot required)"
+    fi
+else
+    echo "✗ /dev/pps0 does not exist (reboot required)"
+fi
+echo ""
+
+echo "4. Chrony Time Sources:"
+echo "----------------------------"
+chronyc sources
+echo ""
+
+echo "5. Chrony Tracking:"
+echo "----------------------------"
+chronyc tracking | grep -E "Reference|Stratum|System time|Last offset"
+echo ""
+
+echo "6. Shared Memory (GPSD -> Chrony):"
+echo "----------------------------"
+if ipcs -m | grep -q 0x4e54; then
+    echo "✓ GPSD shared memory segments found"
+    ipcs -m | grep 0x4e54 | head -3
+else
+    echo "✗ No GPSD shared memory (GPSD may not be running)"
+fi
+echo ""
+
+echo "=========================================="
+echo "Legend:"
+echo "  Chrony sources status:"
+echo "    #* GPS/PPS = Currently selected"
+echo "    #+ GPS/PPS = Combined with selected"
+echo "    #? GPS/PPS = Unreachable or validating"
+echo "    #x GPS/PPS = False ticker (rejected)"
+echo ""
+echo "  For best results:"
+echo "    - GPS should have 3D fix"
+echo "    - PPS should show pulses"
+echo "    - Chrony should show GPS/PPS as sources"
+echo "    - System time offset should be < 1ms"
+echo "=========================================="
+GPSSTATUSEOF
+
+chmod +x /usr/local/bin/dashcam-gps-status
+
+echo -e "${GREEN}✓ GPS PPS time sync configured${NC}"
+echo "  - PPS overlay on GPIO 18"
+echo "  - Chrony configured with GPS + PPS"
+echo "  - Status script: dashcam-gps-status"
+
+echo ""
+echo -e "${GREEN}Step 11: Configuring CAN bus...${NC}"
 
 # Create systemd service to bring up CAN interfaces on boot
 cat > /etc/systemd/system/can-setup.service << 'EOF'
@@ -463,7 +629,7 @@ echo -e "${GREEN}✓ CAN bus configured${NC}"
 echo "  CAN0 and CAN1 will be configured at boot (500 kbps)"
 
 echo ""
-echo -e "${GREEN}Step 11: Creating systemd service...${NC}"
+echo -e "${GREEN}Step 12: Creating systemd service...${NC}"
 
 cat > /etc/systemd/system/dashcam.service << EOF
 [Unit]
@@ -496,7 +662,7 @@ systemctl enable dashcam.service
 echo -e "${GREEN}✓ Systemd service created and enabled${NC}"
 
 echo ""
-echo -e "${GREEN}Step 12: Disabling screen blanking...${NC}"
+echo -e "${GREEN}Step 13: Disabling screen blanking...${NC}"
 
 # Add to rc.local
 if [ ! -f /etc/rc.local ]; then
@@ -518,7 +684,7 @@ fi
 echo -e "${GREEN}✓ Screen blanking disabled${NC}"
 
 echo ""
-echo -e "${GREEN}Step 13: Configuring framebuffer permissions...${NC}"
+echo -e "${GREEN}Step 14: Configuring framebuffer permissions...${NC}"
 
 # Add user to video group for framebuffer access
 usermod -a -G video $SUDO_USER
@@ -541,7 +707,7 @@ EOF
 echo -e "${GREEN}✓ Framebuffer udev rule created${NC}"
 
 echo ""
-echo -e "${GREEN}Step 14: Setting boot order for NVMe...${NC}"
+echo -e "${GREEN}Step 15: Setting boot order for NVMe...${NC}"
 
 # Set boot order to try NVMe first
 BOOT_CONFIG="/tmp/bootloader_config.txt"
@@ -558,7 +724,7 @@ fi
 rm -f "$BOOT_CONFIG"
 
 echo ""
-echo -e "${GREEN}Step 15: Creating convenience scripts...${NC}"
+echo -e "${GREEN}Step 16: Creating convenience scripts...${NC}"
 
 # Camera test script
 cat > /usr/local/bin/dashcam-test-cameras << 'TESTEOF'
@@ -671,6 +837,7 @@ echo -e "${GREEN}✓ Convenience scripts created${NC}"
 echo "  dashcam-test-cameras - Test camera functionality"
 echo "  dashcam-update       - Update software from GitHub"
 echo "  dashcam-status       - Show system status"
+echo "  dashcam-gps-status   - Check GPS/PPS time sync"
 
 echo ""
 echo -e "${BLUE}========================================${NC}"
@@ -687,7 +854,7 @@ echo "    - CAM0: Arducam HQ 12.3MP (front)"
 echo "    - CAM1: Arducam HQ 12.3MP (rear mirror)"
 echo "  ✓ GPU memory set to 256MB for dual cameras"
 echo "  ✓ CMA memory set to 512MB for video buffers"
-echo "  ✓ GPS configured (LC29H on serial port)"
+echo "  ✓ GPS configured (LC29H on serial port) with PPS + chrony time sync"
 echo "  ✓ CAN bus configured (Waveshare 2-CH CAN HAT)"
 echo "  ✓ Repository cloned: $REPO_DIR"
 echo "  ✓ Python virtual environment: $VENV_DIR"
@@ -717,14 +884,17 @@ echo ""
 echo "  4. Edit configuration:"
 echo "     sudo nano $CONFIG_DIR/config.yaml"
 echo ""
-echo "  5. Service management:"
+echo "  5. Verify GPS/PPS time sync:"
+echo "     dashcam-gps-status"
+echo ""
+echo "  6. Service management:"
 echo "     sudo systemctl start dashcam   # Start"
 echo "     sudo systemctl stop dashcam    # Stop"
 echo "     sudo systemctl status dashcam  # Check status"
 echo "     sudo systemctl restart dashcam # Restart"
 echo "     journalctl -u dashcam -f       # View logs"
 echo ""
-echo "  6. Update software:"
+echo "  7. Update software:"
 echo "     dashcam-update"
 echo ""
 echo -e "${YELLOW}Hardware reminder:${NC}"
