@@ -1,10 +1,12 @@
 # GPS Time Sync - Quick Reference
 
+> Note: Chrony-based GPS/PPS time sync is now configured system-wide by `dashcam_install.sh`. The dashcam application no longer adjusts system time directly or uses `gps_time_sync_*` settings.
+
 ## What You Have
 
 - **GPS Module**: LC29H on `/dev/ttyAMA0` @ 115200 baud
-- **NTP Service**: Chrony (for continuous time correction)
-- **Time Sync**: Automatic on startup + every 5 minutes
+- **NTP Service**: Chrony (for continuous GPS/PPS + NTP correction)
+- **Time Sync**: Continuous via chrony (no in-app time setting)
 
 ## Check Status
 
@@ -17,72 +19,46 @@ gpspipe -w -n 5              # Raw GPS data
 
 # Dashcam status
 sudo systemctl status dashcam
-journalctl -u dashcam -f | grep "GPS time sync"
+journalctl -u dashcam -f | grep GPS
 ```
 
-## Manual Time Sync
+## Manual Checks
 
 ```bash
-# Get current GPS time
-gpspipe -w -n 1 | grep GPRMC
+# Chrony service + sources
+sudo systemctl status chrony
+chronyc sources
+chronyc tracking
 
-# Set manually
-sudo timedatectl set-time "2025-11-26 14:30:45"
-```
-
-## Enable/Disable
-
-In `/home/greggc/RacingDashCam/python/dashcam/core/config.py`:
-
-```python
-self.gps_time_sync_enabled = True        # Disable if not needed
-self.gps_time_sync_on_startup = True     # Don't sync on startup
-self.gps_time_sync_update_interval = 300 # Sync interval (seconds)
+# PPS signal sanity check
+sudo ppstest /dev/pps0
 ```
 
 ## Troubleshooting
 
 | Issue | Check |
 |-------|-------|
-| GPS not syncing | `gpspipe -w -n 5` - is GPS data flowing? |
-| Chrony not using GPS | `chronyc sources` - does it list GPS? |
-| Time keeps drifting | `chronyc tracking` - check sync quality |
-| Sync errors in logs | `journalctl -u dashcam -f` |
+| GPS data missing | `gpspipe -w -n 5` - is GPS data flowing? |
+| Chrony missing GPS/PPS | `chronyc sources` - do you see GPS/PPS entries? |
+| PPS not detected | `sudo ppstest /dev/pps0` - pulses every second? |
+| Service issues | `journalctl -u chrony -f`, `journalctl -u gpsd -f` |
 
 ## Logs
 
 ```bash
-# Dashcam GPS sync events
-tail -f /var/opt/dashcam/logs/dashcam_$(date +%Y%m%d).log | grep "GPS time"
-
-# Full dashcam logs with timestamps
+# Dashcam logs
 journalctl -u dashcam -f
 
-# Chrony status
-sudo systemctl status chrony
+# Chrony activity
 chronyc activity
-```
-
-## Advanced: PPS (Optional)
-
-For microsecond-level accuracy, wire GPS PPS output to GPIO 27:
-
-```python
-# In config.py:
-self.gps_pps_enabled = True
-self.gps_pps_gpio = 27
-
-# Then run:
-sudo modprobe pps-gpio
-sudo ppstest /dev/pps0
 ```
 
 ## Video Impact
 
-✅ All video recordings automatically use synced system time
-✅ Timestamps accurate to ~50ms (without PPS) or ~1μs (with PPS)
-✅ GPS coordinates and speed in video overlays
-✅ Metadata embedded in video files
+✅ System time is disciplined by chrony (GPS/PPS + NTP)  
+✅ Video timestamps use that disciplined system clock  
+✅ GPS coordinates and speed in video overlays  
+✅ PPS provides sub-millisecond accuracy when available
 
 ## More Info
 
