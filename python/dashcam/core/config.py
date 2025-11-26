@@ -123,9 +123,12 @@ class Config:
         # ==========================================
         # GPS Configuration
         # ==========================================
-        self.gps_enabled = False  # Enable when GPS module is connected
-        self.gps_device = "/dev/serial0"  # LC29H on UART
-        self.gps_baudrate = 9600
+        self.gps_enabled = True  # Enable when GPS module is connected
+        # Waveshare LC29H GPS/RTK HAT on Raspberry Pi 5
+        # Use /dev/ttyAMA0 for Pi 5 (not /dev/serial0)
+        # Yellow jumper must be at position B for UART mode
+        self.gps_device = "/dev/ttyAMA0"  # LC29H on UART (Pi 5)
+        self.gps_baudrate = 115200  # LC29H default baud rate (not 9600)
         self.gps_timeout = 1.0
         self.gps_log_interval = 1.0  # Log GPS data every second
         

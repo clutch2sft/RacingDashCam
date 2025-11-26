@@ -70,6 +70,9 @@ class GPSHandler:
             
         try:
             # Connect to GPSD
+            # Note: gpsd should be configured to listen on localhost:2947 (default)
+            # and should already be monitoring the configured GPS device
+            self.logger.info(f"Connecting to GPSD (device: {self.config.gps_device} @ {self.config.gps_baudrate} baud)...")
             self.session = gps.gps(mode=gps.WATCH_ENABLE | gps.WATCH_NEWSTYLE)
             
             # Open log file
@@ -87,6 +90,7 @@ class GPSHandler:
             
         except Exception as e:
             self.logger.error(f"Failed to start GPS: {e}")
+            self.logger.error("Ensure GPSD is running and configured with the correct device")
             return False
     
     def stop(self):
