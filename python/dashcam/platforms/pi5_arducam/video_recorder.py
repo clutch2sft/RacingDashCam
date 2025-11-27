@@ -487,6 +487,13 @@ class VideoRecorder:
         # Update display REC indicator
         self.display.set_recording(any_recording)
 
+    def is_recording(self) -> bool:
+        """Return True if any camera is currently recording"""
+        return (
+            (self.front_camera and self.front_camera.recording)
+            or (self.rear_camera and self.rear_camera.recording)
+        )
+
     def stop_recording(self):
         """Stop recording on all cameras"""
         if self.rear_camera and self.rear_camera.recording:

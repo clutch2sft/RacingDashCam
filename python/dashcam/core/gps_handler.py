@@ -242,7 +242,7 @@ class GPSHandler:
             return True  # Always record if speed-based recording is disabled
             
         if not self.has_fix:
-            return True  # Record if no GPS fix (safety fallback)
+            return False  # Wait for GPS fix before speed-based recording
             
         return self.speed_mph >= self.config.start_recording_speed_mph
     

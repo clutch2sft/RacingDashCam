@@ -34,6 +34,7 @@ class DashcamSystem:
         self.recorder = None
         self.gps = None
         self.next_gps_retry = 0.0
+        self.last_movement_time = None
         
         # Setup logging
         self._setup_logging()
@@ -146,9 +147,17 @@ class DashcamSystem:
             if not self.recorder.start():
                 raise RuntimeError("Failed to start video recorder")
             
-            # Start recording (if cameras are configured to record)
-            self.logger.info("Starting recording...")
-            self.recorder.start_recording()
+            # Start recording based on mode
+            if self.config.gps_enabled and self.config.speed_recording_enabled:
+                self.logger.info(
+                    f"Speed-based recording enabled. Waiting for speed >= "
+                    f"{self.config.start_recording_speed_mph} mph"
+                )
+                # Ensure indicator is off until we actually begin recording
+                self.recorder.stop_recording()
+            else:
+                self.logger.info("Starting recording...")
+                self.recorder.start_recording()
             
             self.running = True
             self.logger.info("Dashcam system started successfully")
@@ -233,6 +242,9 @@ class DashcamSystem:
                             self.display.update_gps_data(None)
                     except Exception as e:
                         self.logger.debug(f"Error updating GPS display: {e}")
+
+                # Manage speed-based recording
+                self._manage_speed_based_recording()
                 
                 # Periodic status logging
                 if time.time() - last_status_time >= status_interval:
@@ -250,6 +262,34 @@ class DashcamSystem:
         """Handle system signals"""
         self.logger.info(f"Received signal {signum}")
         self.running = False
+
+    def _manage_speed_based_recording(self):
+        """Start/stop recording based on current GPS speed"""
+        if not self.recorder or not (self.config.gps_enabled and self.config.speed_recording_enabled):
+            return
+
+        # Require an active GPS session to evaluate speed
+        if not self.gps or not getattr(self.gps, 'running', False):
+            return
+
+        now = time.time()
+        should_record = self.gps.should_record()
+
+        if should_record:
+            self.last_movement_time = now
+            if not self.recorder.is_recording():
+                self.logger.info(
+                    f"Speed {self.gps.speed_mph:.1f} mph reached - starting recording"
+                )
+                self.recorder.start_recording()
+        else:
+            # Only stop if we've been below threshold long enough
+            if self.last_movement_time and self.recorder.is_recording():
+                if now - self.last_movement_time >= self.config.stop_recording_delay_seconds:
+                    self.logger.info(
+                        f"Below speed threshold for {self.config.stop_recording_delay_seconds}s - stopping recording"
+                    )
+                    self.recorder.stop_recording()
     
     def _log_configuration(self):
         """Log current configuration"""
