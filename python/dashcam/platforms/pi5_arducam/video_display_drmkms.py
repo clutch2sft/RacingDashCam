@@ -254,6 +254,9 @@ class DrmKmsDisplay:
         self.frame_lock = Lock()
         self.current_frame = None
 
+        # Whether the capture path already applied rotation/flip in hardware
+        self.hw_transform_applied = False
+
         # Overlay reuse from fb0 path
         self.font = None
         self.font_small = None
@@ -480,6 +483,10 @@ class DrmKmsDisplay:
         with self.gps_lock:
             self.current_speed = speed_mph
 
+    def set_hardware_transform_applied(self, applied: bool):
+        """Inform display that capture already applied rotation/flip."""
+        self.hw_transform_applied = bool(applied)
+
     # ------------------------------------------------------------------ Display loop
     def _display_loop(self):
         target_frame_time = 1.0 / max(1, int(self.config.display_fps or 30))
@@ -492,25 +499,26 @@ class DrmKmsDisplay:
                     time.sleep(0.01)
                     continue
 
-                try:
-                    cam_cfg = self.config.get_camera_config(
-                        getattr(self.config, "display_camera_index", 1)
-                    )
-                    rotation = cam_cfg.get("rotation", 0)
-                    hflip = cam_cfg.get("hflip", False)
-                    vflip = cam_cfg.get("vflip", False)
-                except Exception:
-                    rotation = getattr(self.config, "rear_camera_rotation", 0)
-                    hflip = getattr(self.config, "rear_camera_hflip", False)
-                    vflip = getattr(self.config, "rear_camera_vflip", False)
+                if not self.hw_transform_applied:
+                    try:
+                        cam_cfg = self.config.get_camera_config(
+                            getattr(self.config, "display_camera_index", 1)
+                        )
+                        rotation = cam_cfg.get("rotation", 0)
+                        hflip = cam_cfg.get("hflip", False)
+                        vflip = cam_cfg.get("vflip", False)
+                    except Exception:
+                        rotation = getattr(self.config, "rear_camera_rotation", 0)
+                        hflip = getattr(self.config, "rear_camera_hflip", False)
+                        vflip = getattr(self.config, "rear_camera_vflip", False)
 
-                frame = self._apply_transform(
-                    frame,
-                    rotation,
-                    hflip,
-                    vflip,
-                    getattr(self.config, "display_mirror_mode", False),
-                )
+                    frame = self._apply_transform(
+                        frame,
+                        rotation,
+                        hflip,
+                        vflip,
+                        getattr(self.config, "display_mirror_mode", False),
+                    )
 
                 if self.config.overlay_enabled:
                     frame = self._maybe_add_overlay(frame)
