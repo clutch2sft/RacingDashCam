@@ -21,6 +21,7 @@ from typing import Optional
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from numba import jit
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,18 @@ def _IOWR(ioc_type, nr, struct):
 
 
 DRM_IOCTL_BASE = ord("d")
+
+
+@jit(nopython=True, cache=True, parallel=False)
+def pack_xrgb8888_jit(frame, output):
+    """Pack RGB888 frame into XRGB8888 format (numba-accelerated)."""
+    height, width = frame.shape[0], frame.shape[1]
+    for y in range(height):
+        for x in range(width):
+            r = frame[y, x, 0]
+            g = frame[y, x, 1]
+            b = frame[y, x, 2]
+            output[y, x] = (r << 16) | (g << 8) | b
 
 
 class drm_mode_create_dumb(ctypes.Structure):
@@ -243,6 +256,9 @@ class DrmKmsDisplay:
         self.size = None
         self.mmap_obj = None
         self.map_offset = None
+        self._mapped_u32 = None
+        self._pitch_pixels = None
+        self._xrgb_buffer = None
 
         self.width = None
         self.height = None
@@ -278,6 +294,7 @@ class DrmKmsDisplay:
         self._overlay_last_speed = None
         self._overlay_last_rec_state = None
         self._overlay_lock = Lock()
+        self._blended_overlay = None
         self.recording = False
         self.current_speed = None
         self.gps_lock = Lock()
@@ -382,6 +399,7 @@ class DrmKmsDisplay:
         self.mmap_obj = mmap.mmap(
             self.fd, self.size, mmap.MAP_SHARED, mmap.PROT_WRITE, offset=self.map_offset
         )
+        self._init_mmap_views()
 
     def _set_crtc(self):
         conn_array = (ctypes.c_uint32 * 1)()
@@ -420,6 +438,26 @@ class DrmKmsDisplay:
                 ret = ret2
             raise RuntimeError(f"drmModeSetCrtc failed ({ret})")
 
+    def _init_mmap_views(self):
+        """Create NumPy views over the mapped dumb buffer for fast writes."""
+        try:
+            if self.mmap_obj is None or self.pitch is None or self.height is None:
+                return
+            # pitch is bytes per line; convert to pixels (uint32 per pixel)
+            self._pitch_pixels = max(1, self.pitch // 4)
+            self._mapped_u32 = np.ndarray(
+                (self.height, self._pitch_pixels),
+                dtype=np.uint32,
+                buffer=self.mmap_obj,
+            )
+            # Scratch buffer for packed XRGB8888
+            self._xrgb_buffer = np.empty((self.height, self.width), dtype=np.uint32)
+        except Exception as exc:
+            self.logger.debug(f"Failed to init mmap views: {exc}")
+            self._mapped_u32 = None
+            self._xrgb_buffer = None
+            self._pitch_pixels = None
+
     def start(self):
         """Start KMS display."""
         try:
@@ -432,6 +470,8 @@ class DrmKmsDisplay:
             )
             self._create_dumb_buffer()
             self._set_crtc()
+            # Rebuild views if mode fallback adjusted geometry
+            self._init_mmap_views()
 
             self.running = True
             self.stop_event.clear()
@@ -460,6 +500,9 @@ class DrmKmsDisplay:
                 self.mmap_obj.close()
         finally:
             self.mmap_obj = None
+            self._mapped_u32 = None
+            self._xrgb_buffer = None
+            self._pitch_pixels = None
 
         if self.fb_id and self.fd:
             try:
@@ -483,6 +526,7 @@ class DrmKmsDisplay:
             except Exception:
                 pass
         self.fd = None
+        self._blended_overlay = None
 
     # ------------------------------------------------------------------ Public API parity
     def update_frame(self, frame: np.ndarray):
@@ -544,12 +588,10 @@ class DrmKmsDisplay:
                         self._prof_transform += (t_tf_end - t_tf_start) * 1000.0
 
                 if self.config.overlay_enabled:
-                    t_ov_start = time.time()
-                    frame = self._maybe_add_overlay(frame)
-                    t_ov_end = time.time()
+                    frame, render_ms, blend_ms = self._maybe_add_overlay(frame)
                     if self._prof_enabled:
-                        # Overlay helper itself includes render+blend time; treat combined.
-                        self._prof_overlay_render += (t_ov_end - t_ov_start) * 1000.0
+                        self._prof_overlay_render += render_ms
+                        self._prof_blend += blend_ms
 
                 t_blit_start = time.time()
                 self._blit_frame(frame)
@@ -570,15 +612,16 @@ class DrmKmsDisplay:
                         avg_capture = self._prof_capture / max(1, self._prof_frames)
                         avg_transform = self._prof_transform / max(1, self._prof_frames)
                         avg_overlay = self._prof_overlay_render / max(1, self._prof_frames)
+                        avg_blend = self._prof_blend / max(1, self._prof_frames)
                         avg_blit = self._prof_blit / max(1, self._prof_frames)
                         avg_other = max(
                             0.0,
-                            (interval * 1000.0) / max(1, frames) - (avg_capture + avg_transform + avg_overlay + avg_blit),
+                            (interval * 1000.0) / max(1, frames) - (avg_capture + avg_transform + avg_overlay + avg_blend + avg_blit),
                         )
                         self.logger.debug(
                             f"DRM Display FPS: {self.actual_fps:.1f} | timings (ms/frame): "
                             f"capture={avg_capture:.1f} transform={avg_transform:.1f} "
-                            f"overlay={avg_overlay:.1f} blit={avg_blit:.1f} other~={avg_other:.1f}"
+                            f"overlay={avg_overlay:.1f} blend={avg_blend:.1f} blit={avg_blit:.1f} other~={avg_other:.1f}"
                         )
                     self.fps_frame_count = 0
                     self.last_fps_calc = time.time()
@@ -586,6 +629,7 @@ class DrmKmsDisplay:
                     self._prof_capture = 0.0
                     self._prof_transform = 0.0
                     self._prof_overlay_render = 0.0
+                    self._prof_blend = 0.0
                     self._prof_blit = 0.0
                     self._prof_other = 0.0
 
@@ -598,26 +642,44 @@ class DrmKmsDisplay:
         if self.mmap_obj is None:
             return
         if frame.shape[0] != self.height or frame.shape[1] != self.width:
-            frame = np.array(Image.fromarray(frame).resize((self.width, self.height)))
+            frame = self._resize_nn(frame, self.width, self.height)
         if frame.dtype != np.uint8:
             frame = frame.astype(np.uint8)
 
-        # Convert RGB888 -> XRGB8888
-        rgb = frame.astype(np.uint32)
-        xrgb = (rgb[:, :, 0] << 16) | (rgb[:, :, 1] << 8) | rgb[:, :, 2]
-        xrgb = xrgb.astype(np.uint32)
+        if self._xrgb_buffer is None or self._xrgb_buffer.shape[0] != self.height or self._xrgb_buffer.shape[1] != self.width:
+            self._xrgb_buffer = np.empty((self.height, self.width), dtype=np.uint32)
 
-        # Respect pitch (bytes per line)
+        # Convert RGB888 -> XRGB8888 using numba and copy directly into mapped view
+        pack_xrgb8888_jit(frame, self._xrgb_buffer)
+
+        if self._mapped_u32 is not None and self._pitch_pixels and self._pitch_pixels >= self.width:
+            try:
+                self._mapped_u32[:, : self.width] = self._xrgb_buffer
+                return
+            except Exception:
+                # Fall back to byte copy path
+                pass
+
+        # Fallback path when NumPy view is unavailable
+        xrgb_bytes = self._xrgb_buffer.tobytes()
         if self.pitch and self.pitch != self.width * 4:
+            row_bytes = self.width * 4
             for y in range(self.height):
-                line = xrgb[y, :].tobytes()
                 start = y * self.pitch
-                self.mmap_obj[start : start + len(line)] = line
+                end = start + row_bytes
+                row_start = y * row_bytes
+                self.mmap_obj[start:end] = xrgb_bytes[row_start:row_start + row_bytes]
         else:
-            self.mmap_obj[: xrgb.nbytes] = xrgb.tobytes()
+            self.mmap_obj[: len(xrgb_bytes)] = xrgb_bytes
 
     # ------------------------------------------------------------------ Overlay helpers (trimmed)
-    def _maybe_add_overlay(self, frame: np.ndarray) -> np.ndarray:
+    def _maybe_add_overlay(self, frame: np.ndarray):
+        """Update cached overlay when needed and blend using a precomputed mask.
+
+        Returns the frame plus render/blend timings in milliseconds for profiling.
+        """
+        render_ms = 0.0
+        blend_ms = 0.0
         now_sec = datetime.now().second
         with self._overlay_lock:
             with self.gps_lock:
@@ -644,16 +706,66 @@ class DrmKmsDisplay:
             )
 
             if needs_update:
+                t_or_start = time.time()
                 try:
                     self._overlay_rgba = self._render_overlay_rgba(rec_state)
+                    self._blended_overlay = self._precompute_blend_mask(self._overlay_rgba)
                 except Exception:
                     self._overlay_rgba = None
+                    self._blended_overlay = None
                 self._overlay_last_time_sec = now_sec
                 self._overlay_last_speed = cs
                 self._overlay_last_rec_state = rec_state
+                render_ms = (time.time() - t_or_start) * 1000.0
 
-            if self._overlay_rgba is not None:
-                return self._blend_overlay(frame, self._overlay_rgba)
+            blend_mask = self._blended_overlay
+
+        if blend_mask is not None:
+            t_bl_start = time.time()
+            frame = self._apply_blended_overlay(frame, blend_mask)
+            blend_ms = (time.time() - t_bl_start) * 1000.0
+
+        return frame, render_ms, blend_ms
+
+    def _precompute_blend_mask(self, overlay_rgba):
+        """Pre-compute blend region once when overlay content changes."""
+        if overlay_rgba is None:
+            return None
+        try:
+            alpha = overlay_rgba[:, :, 3]
+            if not np.any(alpha):
+                return None
+            ys, xs = np.where(alpha > 0)
+            y0, y1 = ys.min(), ys.max()
+            x0, x1 = xs.min(), xs.max()
+            o_sub = overlay_rgba[y0 : y1 + 1, x0 : x1 + 1]
+            return {
+                "bbox": (y0, y1, x0, x1),
+                "overlay": o_sub,
+                "alpha": o_sub[:, :, 3].astype(np.uint16),
+                "rgb": o_sub[:, :, :3].astype(np.uint16),
+            }
+        except Exception:
+            return None
+
+    def _apply_blended_overlay(self, frame, blend_mask):
+        """Apply cached overlay mask without recomputing bounding boxes."""
+        if blend_mask is None:
+            return frame
+        try:
+            y0, y1, x0, x1 = blend_mask["bbox"]
+            o_rgb = blend_mask["rgb"]
+            o_a = blend_mask["alpha"]
+            f_sub = frame[y0 : y1 + 1, x0 : x1 + 1].astype(np.uint16)
+
+            a_exp = o_a[:, :, None].astype(np.uint32)
+            o_exp = o_rgb.astype(np.uint32)
+            f_exp = f_sub.astype(np.uint32)
+            out_sub = (a_exp * o_exp + (255 - a_exp) * f_exp + 127) // 255
+            out_sub = np.clip(out_sub, 0, 255).astype(np.uint8)
+            frame[y0 : y1 + 1, x0 : x1 + 1] = out_sub
+            return frame
+        except Exception:
             return frame
 
     def _render_overlay_rgba(self, rec_state: bool) -> Optional[np.ndarray]:
@@ -750,6 +862,21 @@ class DrmKmsDisplay:
             self.font = ImageFont.load_default()
             self.font_small = ImageFont.load_default()
             self.logger.warning("Using default PIL font for DRM/KMS overlay")
+
+    def _resize_nn(self, frame: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
+        """Nearest-neighbor resize using NumPy indexing (no PIL overhead)."""
+        if frame is None:
+            return frame
+        if frame.ndim == 2:
+            frame = frame[:, :, None]
+        src_h, src_w = frame.shape[:2]
+        if src_h == out_h and src_w == out_w:
+            return frame
+        row_idx = (np.arange(out_h) * (src_h / out_h)).astype(np.int32)
+        col_idx = (np.arange(out_w) * (src_w / out_w)).astype(np.int32)
+        row_idx = np.clip(row_idx, 0, src_h - 1)
+        col_idx = np.clip(col_idx, 0, src_w - 1)
+        return frame[row_idx[:, None], col_idx]
 
     def _apply_transform(self, frame: np.ndarray, rotation: int, hflip: bool, vflip: bool, mirror_mode: bool = False) -> np.ndarray:
         try:
