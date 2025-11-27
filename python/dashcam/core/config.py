@@ -117,7 +117,12 @@ class Config:
         self.overlay_font_size = 32
         self.overlay_font_color = (255, 255, 255)  # White
         self.overlay_bg_color = (0, 0, 0)  # Black background
-        self.overlay_bg_alpha = 128  # Semi-transparent
+        self.overlay_bg_alpha = 96  # Semi-transparent (softer by default)
+        self.overlay_corner_radius = 8  # Rounded panel corners
+        self.overlay_shadow_enabled = True
+        self.overlay_shadow_offset = (2, 2)  # x, y offset for shadow
+        self.overlay_shadow_alpha = 80
+        self.overlay_shadow_color = (0, 0, 0)
         self.overlay_outline = True  # Add outline for better visibility
         self.overlay_outline_color = (0, 0, 0)  # Black outline
         

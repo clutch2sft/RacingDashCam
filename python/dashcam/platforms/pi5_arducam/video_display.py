@@ -590,28 +590,36 @@ class VideoDisplay:
     
     def _draw_text_with_bg(self, draw: ImageDraw.Draw, text: str, pos: tuple, 
                            color: tuple, font: ImageFont.ImageFont):
-        """Draw text with semi-transparent background and optional outline"""
+        """Draw text with semi-transparent rounded background and optional shadow/outline."""
         x, y = pos
-        
-        # Draw outline if enabled
+
+        # Rounded panel sizing
+        padding = 5
+        corner_radius = getattr(self.config, "overlay_corner_radius", 8)
+        bbox = draw.textbbox((x, y), text, font=font)
+        bbox = (bbox[0] - padding, bbox[1] - padding, bbox[2] + padding, bbox[3] + padding)
+
+        # Optional shadow for depth (cheap: single offset fill, no blur)
+        if getattr(self.config, "overlay_shadow_enabled", False):
+            shadow_offset = getattr(self.config, "overlay_shadow_offset", (2, 2))
+            shadow_alpha = getattr(self.config, "overlay_shadow_alpha", 80)
+            shadow_color = getattr(self.config, "overlay_shadow_color", (0, 0, 0))
+            sx, sy = shadow_offset
+            shadow_bbox = (bbox[0] + sx, bbox[1] + sy, bbox[2] + sx, bbox[3] + sy)
+            draw.rounded_rectangle(shadow_bbox, radius=corner_radius,
+                                   fill=shadow_color + (shadow_alpha,))
+
+        # Panel
+        bg_color = self.config.overlay_bg_color + (self.config.overlay_bg_alpha,)
+        draw.rounded_rectangle(bbox, radius=corner_radius, fill=bg_color)
+
+        # Outline (kept thin) for legibility
         if self.config.overlay_outline:
             outline_color = self.config.overlay_outline_color
-            for dx, dy in [(-1,-1), (-1,1), (1,-1), (1,1), (-1,0), (1,0), (0,-1), (0,1)]:
-                draw.text((x+dx, y+dy), text, font=font, fill=outline_color)
-        
-        # Get text bounding box
-        bbox = draw.textbbox((x, y), text, font=font)
-        
-        # Add padding
-        padding = 5
-        bbox = (bbox[0] - padding, bbox[1] - padding, 
-                bbox[2] + padding, bbox[3] + padding)
-        
-        # Draw background
-        bg_color = self.config.overlay_bg_color + (self.config.overlay_bg_alpha,)
-        draw.rectangle(bbox, fill=bg_color)
-        
-        # Draw text
+            for dx, dy in [(-1, -1), (-1, 1), (1, -1), (1, 1), (-1, 0), (1, 0), (0, -1), (0, 1)]:
+                draw.text((x + dx, y + dy), text, font=font, fill=outline_color)
+
+        # Text
         draw.text((x, y), text, font=font, fill=color)
 
     def _apply_transform(self, frame: np.ndarray, rotation: int, hflip: bool, vflip: bool, mirror_mode: bool=False) -> np.ndarray:
