@@ -234,6 +234,8 @@ class DrmKmsDisplay:
         self.connector_id = None
         self.crtc_id = None
         self.mode = None
+        self._fallback_mode = None
+        self._fallback_crtc = None
 
         self.fb_id = None
         self.handle = None
@@ -303,6 +305,13 @@ class DrmKmsDisplay:
                                     break
                         if crtc_id == 0:
                             continue
+                        # Save current CRTC (for fallback mode if needed)
+                        current_crtc = libdrm.drmModeGetCrtc(self.fd, crtc_id)
+                        if current_crtc:
+                            self._fallback_crtc = current_crtc
+                            if current_crtc.contents.mode_valid:
+                                self._fallback_mode = current_crtc.contents.mode
+
                         self.connector_id = conn_id
                         self.crtc_id = crtc_id
                         self.mode = mode
@@ -372,6 +381,27 @@ class DrmKmsDisplay:
             ctypes.byref(self.mode),
         )
         if ret != 0:
+            # Try fallback to current crtc mode if available
+            if self._fallback_mode is not None:
+                self.logger.debug(
+                    f"drmModeSetCrtc failed ({ret}), retrying with existing CRTC mode"
+                )
+                ret2 = libdrm.drmModeSetCrtc(
+                    self.fd,
+                    self.crtc_id,
+                    self.fb_id,
+                    0,
+                    0,
+                    conn_array,
+                    1,
+                    ctypes.byref(self._fallback_mode),
+                )
+                if ret2 == 0:
+                    # Update width/height to fallback mode to keep sizing consistent
+                    self.width = self._fallback_mode.hdisplay
+                    self.height = self._fallback_mode.vdisplay
+                    return
+                ret = ret2
             raise RuntimeError(f"drmModeSetCrtc failed ({ret})")
 
     def start(self):
@@ -379,6 +409,11 @@ class DrmKmsDisplay:
         try:
             self._open_device()
             self._choose_connector_and_mode()
+            self.logger.info(
+                f"DRM connector={self.connector_id} crtc={self.crtc_id} "
+                f"mode={self.mode.hdisplay}x{self.mode.vdisplay}@{self.mode.vrefresh}Hz "
+                f"(pitch request later)"
+            )
             self._create_dumb_buffer()
             self._set_crtc()
 
