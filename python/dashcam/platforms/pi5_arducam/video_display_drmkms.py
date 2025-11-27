@@ -293,8 +293,18 @@ class DrmKmsDisplay:
                     if not enc:
                         continue
                     try:
+                        # Choose a valid CRTC: prefer encoder's crtc_id, otherwise pick from possible_crtcs bitmask
+                        crtc_id = enc.contents.crtc_id
+                        if crtc_id == 0:
+                            mask = enc.contents.possible_crtcs
+                            for c in range(res.contents.count_crtcs):
+                                if mask & (1 << c):
+                                    crtc_id = res.contents.crtcs[c]
+                                    break
+                        if crtc_id == 0:
+                            continue
                         self.connector_id = conn_id
-                        self.crtc_id = enc.contents.crtc_id
+                        self.crtc_id = crtc_id
                         self.mode = mode
                         self.width = mode.hdisplay
                         self.height = mode.vdisplay
@@ -305,7 +315,7 @@ class DrmKmsDisplay:
                     libdrm.drmModeFreeConnector(conn)
         finally:
             libdrm.drmModeFreeResources(res)
-        raise RuntimeError("No connected DRM connector with a usable mode")
+        raise RuntimeError("No connected DRM connector with a usable mode/CRTC")
 
     def _create_dumb_buffer(self):
         create = drm_mode_create_dumb()
