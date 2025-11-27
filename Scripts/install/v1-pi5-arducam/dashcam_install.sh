@@ -467,65 +467,157 @@ echo -e "${GREEN}Step 9: Creating default configuration...${NC}"
 # Create a default config file if it doesn't exist
 if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
     cat > "$CONFIG_DIR/config.yaml" << 'EOF'
-# Active Dash Mirror Configuration
-# Edit this file to customize your setup
-
-# Video settings
-video:
-  # Directory for video recordings
-  output_dir: /var/opt/dashcam/videos/current
-  
-  # Archive directory for processed videos
+paths:
+  base_dir: /opt/dashcam
+  video_dir: /var/opt/dashcam/videos
+  current_dir: /var/opt/dashcam/videos/current
   archive_dir: /var/opt/dashcam/videos/archive
-  
-  # Resolution for front camera (CAM0)
-  front_resolution: [1920, 1080]
-  
-  # Resolution for rear camera (CAM1) 
-  rear_resolution: [1920, 1080]
-  
-  # Frame rate
-  framerate: 30
-  
-  # Video segment duration in seconds
+  log_dir: /var/opt/dashcam/logs
+
+video:
+  codec: h264
+  front_bitrate: 8000000
+  rear_bitrate: 8000000
   segment_duration: 60
-  
-  # Keep last N segments (rolling buffer)
-  keep_segments: 10
+  front_prefix: front
+  rear_prefix: rear
+  disk_high_water_mark: 0.75
+  keep_minimum_gb: 10.0
 
-# Display settings
+cameras:
+  display_camera_index: 1
+  front:
+    enabled: true
+    index: 0
+    resolution: [1920, 1080]
+    fps: 15
+    recording_enabled: true
+    bitrate: 8000000
+    rotation: 180
+    hflip: false
+    vflip: false
+  rear:
+    enabled: true
+    index: 1
+    resolution: [1920, 1080]
+    fps: 15
+    recording_enabled: true
+    bitrate: 8000000
+    rotation: 180
+    hflip: true
+    vflip: false
+
 display:
-  # Main display resolution
   resolution: [1920, 1080]
-  
-  # Show rear camera as picture-in-picture
-  pip_enabled: true
-  
-  # PIP size and position (x, y, width, height)
-  pip_rect: [1520, 20, 380, 214]
-  
-  # Show overlay info (speed, GPS, etc)
-  overlay_enabled: true
+  fps: 15
+  backend: drm
+  drm_card: /dev/dri/card1
+  input_is_bgr: false
+  use_framebuffer: true
+  framebuffer_device: /dev/fb0
+  fullscreen: true
+  mirror_mode: true
 
-# GPS settings
+overlay:
+  enabled: true
+  time_format: "%H:%M:%S"
+  date_format: "%Y-%m-%d"
+  time_pos: [20, 20]
+  date_pos: [20, 60]
+  speed_pos: [20, 100]
+  rec_indicator_pos: [1820, 20]
+  font_size: 32
+  font_color: [255, 255, 255]
+  bg_color: [0, 0, 0]
+  bg_alpha: 96
+  corner_radius: 8
+  shadow_enabled: true
+  shadow_offset: [2, 2]
+  shadow_alpha: 80
+  shadow_color: [0, 0, 0]
+  outline: true
+  outline_color: [0, 0, 0]
+  rec_indicator_text: "⬤ REC"
+  rec_indicator_color: [255, 0, 0]
+  rec_indicator_blink: false
+  rec_indicator_blink_rate: 1.0
+
 gps:
   enabled: true
-  device: /dev/serial0
+  device: /dev/ttyAMA0
+  baudrate: 115200
+  timeout: 1.0
+  log_interval: 1.0
+  display_speed: true
+  speed_unit: mph
+  speed_recording_enabled: true
+  start_recording_speed_mph: 15.0
+  stop_recording_delay_seconds: 120
+  retry_attempts: 5
+  retry_delay: 5.0
+  gps_required: false
 
-# CAN bus settings
 canbus:
-  enabled: true
-  # Vehicle profile to use (see dashcam/canbus/vehicles/)
-  vehicle: camaro_2013_lfx
-  # CAN interfaces
-  interfaces:
-    - can0
-    - can1
+  enabled: false
+  channel: can0
+  bitrate: 500000
+  vehicle_type: camaro_2013_lfx
+  display_data: false
+  overlay_position: [20, 140]
+  record_data: false
+  log_interval: 1.0
 
-# Logging
+fuel:
+  display_fuel_consumed: true
+  overlay_position: [20, 140]
+  flow_conversion_factor: 0.01
+  safety_margin: 1.025
+  auto_reset_enabled: true
+  auto_reset_threshold: 95.0
+  auto_reset_duration: 5.0
+  display_unit: gallons
+  display_decimals: 3
+
+performance:
+  camera_buffer_count: 4
+  encoder_buffer_count: 6
+  use_threading: true
+  display_thread_priority: 1
+  frame_queue_size: 2
+
+errors:
+  camera_retry_attempts: 3
+  camera_retry_delay: 2.0
+  camera_failure_reboot: false
+  continue_on_single_camera: true
+
 logging:
   level: INFO
-  dir: /var/opt/dashcam/logs
+  max_size: 10485760
+  backup_count: 5
+  to_console: true
+  log_fps: true
+  log_dropped_frames: true
+
+system:
+  startup_delay: 3.0
+  shutdown_grace_period: 5.0
+  watchdog_enabled: true
+  watchdog_timeout: 30.0
+  cpu_governor: performance
+
+camera_control:
+  auto_exposure: true
+  auto_white_balance: true
+  auto_focus: false
+  exposure_time: 10000
+  analog_gain: 1.0
+  awb_red_gain: 1.5
+  awb_blue_gain: 1.5
+  contrast: 1.0
+  brightness: 0.0
+  saturation: 1.0
+  sharpness: 1.0
 EOF
 
     chown $SUDO_USER:$SUDO_USER "$CONFIG_DIR/config.yaml"
