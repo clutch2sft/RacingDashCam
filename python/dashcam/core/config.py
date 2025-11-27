@@ -88,8 +88,9 @@ class Config:
         self.display_backend = "drm"
         # DRM device path (used when display_backend == "drm")
         self.display_drm_card = "/dev/dri/card1"
-        # Picamera2 lores capture returns BGR order; convert to RGB for display
-        self.display_input_is_bgr = True
+        # Picamera2 lores capture can be requested as RGB; set True only if
+        # frames arrive in BGR and need swapping.
+        self.display_input_is_bgr = False
         
         # Display format (for direct framebuffer rendering)
         self.use_framebuffer = True  # Direct rendering to /dev/fb0

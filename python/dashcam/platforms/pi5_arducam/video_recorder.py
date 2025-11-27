@@ -16,7 +16,7 @@ from typing import Optional
 import numpy as np
 
 try:
-    from picamera2 import Picamera2
+    from picamera2 import Picamera2, ColourSpace
     from picamera2.encoders import H264Encoder, Quality
     from picamera2.outputs import FfmpegOutput
     PICAMERA2_AVAILABLE = True
@@ -81,7 +81,12 @@ class CameraRecorder:
                 )
                 camera_config = self.camera.create_video_configuration(
                     main={"size": (self.width, self.height), "format": "YUV420"},  # For encoder
-                    lores={"size": (self.width, self.height), "format": "RGB888"},  # For display
+                    # Explicitly request RGB output from ISP to avoid per-frame BGR->RGB swaps
+                    lores={
+                        "size": (self.width, self.height),
+                        "format": "RGB888",
+                        "colour_space": ColourSpace.Srgb,
+                    },
                     controls={
                         "FrameRate": self.fps,
                     }
