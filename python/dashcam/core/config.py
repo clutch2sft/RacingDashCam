@@ -141,8 +141,8 @@ class Config:
         self.speed_unit = "mph"  # "mph" or "kph"
         
         # Speed-based recording (when GPS is enabled)
-        self.speed_recording_enabled = False  # Set True to only record when moving
-        self.start_recording_speed_mph = 5.0  # Start recording above 5 mph
+        self.speed_recording_enabled = True  # Set True to only record when moving
+        self.start_recording_speed_mph = 15.0  # Start recording above 5 mph
         self.stop_recording_delay_seconds = 120  # Keep recording 2 min after stopping
         
         # ==========================================
