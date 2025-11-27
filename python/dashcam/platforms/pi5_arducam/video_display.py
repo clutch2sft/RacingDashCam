@@ -270,6 +270,8 @@ class VideoDisplay:
                     # No frame yet, show black
                     frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
                 
+                frame = self._ensure_rgb(frame)
+                
                 # Apply per-camera transforms (rotation, hflip, vflip) only if
                 # hardware hasn't already applied them. If hardware transform is
                 # applied we skip software rotation/flips to avoid double-transform.
@@ -651,6 +653,20 @@ class VideoDisplay:
         except Exception as e:
             self.logger.debug(f"Transform failed (numpy), falling back: {e}")
             return frame
+
+    def _ensure_rgb(self, frame: np.ndarray) -> np.ndarray:
+        """Convert BGR input to RGB if configured."""
+        try:
+            if (
+                getattr(self.config, "display_input_is_bgr", False)
+                and isinstance(frame, np.ndarray)
+                and frame.ndim == 3
+                and frame.shape[2] == 3
+            ):
+                return frame[:, :, ::-1]
+        except Exception:
+            pass
+        return frame
 
     def set_hardware_transform_applied(self, applied: bool):
         """Inform the display whether hardware (libcamera) applied transforms.

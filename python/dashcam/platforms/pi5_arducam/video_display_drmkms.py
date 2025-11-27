@@ -499,6 +499,8 @@ class DrmKmsDisplay:
                     time.sleep(0.01)
                     continue
 
+                frame = self._ensure_rgb(frame)
+
                 if not self.hw_transform_applied:
                     try:
                         cam_cfg = self.config.get_camera_config(
@@ -666,6 +668,20 @@ class DrmKmsDisplay:
         draw.text((x, y), text, font=font, fill=color)
 
     # ------------------------------------------------------------------ Helpers
+    def _ensure_rgb(self, frame: np.ndarray) -> np.ndarray:
+        """Convert BGR input to RGB if configured."""
+        try:
+            if (
+                getattr(self.config, "display_input_is_bgr", False)
+                and isinstance(frame, np.ndarray)
+                and frame.ndim == 3
+                and frame.shape[2] == 3
+            ):
+                return frame[:, :, ::-1]
+        except Exception:
+            pass
+        return frame
+
     def _load_fonts(self):
         try:
             self.font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", self.config.overlay_font_size)
