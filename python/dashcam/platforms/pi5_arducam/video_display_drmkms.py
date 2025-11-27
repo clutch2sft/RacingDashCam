@@ -492,11 +492,23 @@ class DrmKmsDisplay:
                     time.sleep(0.01)
                     continue
 
+                try:
+                    cam_cfg = self.config.get_camera_config(
+                        getattr(self.config, "display_camera_index", 1)
+                    )
+                    rotation = cam_cfg.get("rotation", 0)
+                    hflip = cam_cfg.get("hflip", False)
+                    vflip = cam_cfg.get("vflip", False)
+                except Exception:
+                    rotation = getattr(self.config, "rear_camera_rotation", 0)
+                    hflip = getattr(self.config, "rear_camera_hflip", False)
+                    vflip = getattr(self.config, "rear_camera_vflip", False)
+
                 frame = self._apply_transform(
                     frame,
-                    getattr(self.config, "rear_camera_rotation", 0),
-                    getattr(self.config, "rear_camera_hflip", False),
-                    getattr(self.config, "rear_camera_vflip", False),
+                    rotation,
+                    hflip,
+                    vflip,
                     getattr(self.config, "display_mirror_mode", False),
                 )
 
