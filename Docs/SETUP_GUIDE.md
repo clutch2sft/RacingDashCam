@@ -1394,8 +1394,8 @@ Wait for boot, then verify:
    
    # Should have:
    dtparam=spi=on
-   dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=25,spimaxfrequency=2000000
-   dtoverlay=mcp2515-can1,oscillator=12000000,interrupt=24,spimaxfrequency=2000000
+   dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=22
+   dtoverlay=mcp2515-can1,oscillator=16000000,interrupt=13
    ```
 
 2. **Check CAN HAT Physical Connection**

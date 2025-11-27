@@ -64,6 +64,28 @@ Complete dashcam system with dual CSI cameras, CAN bus vehicle data integration,
 
 ## Quick Start
 
+### Hardware Setup
+
+CAN HAT SPI Mode Selection
+
+The Waveshare 2-CH CAN HAT Plus supports SPI0 and SPI1.
+
+Because:
+
+GPS PPS requires GPIO18
+
+SPI1 uses GPIO18 as spi1_cs
+
+GPIO18 conflict prevents CAN from loading
+
+You must configure the CAN HAT for SPI0 by setting the solder jumpers:
+
+Pad	Set To
+MISO	SPI0 (GPIO 9)
+MOSI	SPI0 (GPIO 10)
+SCK	SPI0 (GPIO 11)
+CE0/CE1	SPI0 CS0/CS1 (GPIO 8/7)
+
 ### 1. Install OS to NVMe
 
 See [SETUP_GUIDE.md](SETUP_GUIDE.md) for detailed instructions.

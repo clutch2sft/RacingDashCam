@@ -184,8 +184,11 @@ enable_uart=1
 # CAN Bus Configuration (Waveshare 2-CH CAN HAT Plus)
 # Enable SPI for MCP2515 CAN controllers
 dtparam=spi=on
-dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=25,spimaxfrequency=2000000
-dtoverlay=mcp2515-can1,oscillator=12000000,interrupt=24,spimaxfrequency=2000000
+# CAN0 on SPI0 CE0 (GPIO8) with INT on GPIO22 (INT_0 jumper → D22)
+dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=22
+
+# CAN1 on SPI0 CE1 (GPIO7) with INT on GPIO13 (INT_1 jumper → D13)
+dtoverlay=mcp2515-can1,oscillator=16000000,interrupt=13
 
 # End Active Dash Mirror Configuration
 # ========================================

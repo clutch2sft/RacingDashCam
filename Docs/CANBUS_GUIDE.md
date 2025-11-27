@@ -7,15 +7,22 @@ The Waveshare 2-CH CAN HAT Plus provides dual MCP2515 CAN controllers connected 
 ### Hardware Specifications:
 - **Controller**: MCP2515 CAN controller (x2)
 - **Transceiver**: SN65HVD230 CAN transceiver (x2)
-- **Oscillator**: 12MHz
+- **Oscillator**: 16 MHz
 - **Interface**: SPI
 - **Channels**: can0 and can1
-- **Interrupts**: GPIO25 (can0), GPIO24 (can1)
+- **Interrupts**: GPIO22 (can0), GPIO13 (can1)
 
 ### Pin Connections:
-- **CAN0**: GPIO25 (interrupt)
-- **CAN1**: GPIO24 (interrupt)
-- **SPI**: Standard Raspberry Pi SPI pins
+| Function           | Pi GPIO     | Pi Header Pin |
+| ------------------ | ----------- | ------------- |
+| SPI0 CE1           | GPIO 7      | Pin 26        |
+| SPI0 CE0           | GPIO 8      | Pin 24        |
+| SPI0 SCLK          | GPIO 11     | Pin 23        |
+| SPI0 MISO          | GPIO 9      | Pin 21        |
+| SPI0 MOSI          | GPIO 10     | Pin 19        |
+| **CAN0 Interrupt** | **GPIO 22** | **Pin 15**    |
+| **CAN1 Interrupt** | **GPIO 13** | **Pin 33**    |
+
 
 ## Software Components
 
@@ -64,8 +71,8 @@ The install script will:
 1. **Update config.txt** (`/boot/firmware/config.txt`):
 ```
 dtparam=spi=on
-dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=25,spimaxfrequency=2000000
-dtoverlay=mcp2515-can1,oscillator=12000000,interrupt=24,spimaxfrequency=2000000
+dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=22
+dtoverlay=mcp2515-can1,oscillator=16000000,interrupt=13
 ```
 
 2. **Install packages**:
@@ -240,6 +247,11 @@ dtoverlay -l
 
 # Should see mcp2515-can0 and mcp2515-can1
 ```
+If you use GPS PPS and dtoverlay=gps or a LC29H PPS line,
+do not use GPIO18 for any SPI / CAN overlay.
+MCP2515 overlays will fail to load with “pin already requested” errors.
+
+msg: pinctrl-rp1 ... pin gpio18 already requested by pps@12
 
 ### No CAN messages received:
 1. Check physical connections to vehicle OBD-II port:
