@@ -24,12 +24,16 @@ DURATION = int(sys.argv[1]) if len(sys.argv) > 1 else 15
 
 def make_test_frame(width: int, height: int, t: float) -> np.ndarray:
     """Generate a simple color pattern that shifts over time."""
-    x = np.linspace(0, 255, width, dtype=np.uint8)
-    y = np.linspace(0, 255, height, dtype=np.uint8)
+    # Use wider types for math to avoid overflow errors on large t
+    x = np.linspace(0, 255, width, dtype=np.uint32)
+    y = np.linspace(0, 255, height, dtype=np.uint32)
     xv, yv = np.meshgrid(x, y)
-    r = (xv + int(t * 30)) % 256
-    g = (yv + int(t * 60)) % 256
-    b = ((xv // 2) + (yv // 2) + int(t * 90)) % 256
+    t30 = np.uint32(int(t * 30) % 256)
+    t60 = np.uint32(int(t * 60) % 256)
+    t90 = np.uint32(int(t * 90) % 256)
+    r = (xv + t30) % 256
+    g = (yv + t60) % 256
+    b = ((xv // 2) + (yv // 2) + t90) % 256
     frame = np.stack([r, g, b], axis=2).astype(np.uint8)
     return frame
 
