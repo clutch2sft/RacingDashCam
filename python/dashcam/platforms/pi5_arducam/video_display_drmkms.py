@@ -299,6 +299,10 @@ class DrmKmsDisplay:
         self.current_speed = None
         self.gps_lock = Lock()
 
+        # CAN bus vehicle data
+        self.canbus_vehicle = None  # Will be set by set_canbus_vehicle()
+        self.canbus_lock = Lock()
+
         self._load_fonts()
 
     # ------------------------------------------------------------------ DRM init/cleanup
@@ -540,6 +544,11 @@ class DrmKmsDisplay:
         with self.gps_lock:
             self.current_speed = speed_mph
 
+    def set_canbus_vehicle(self, canbus_vehicle):
+        """Set CAN bus vehicle interface for accessing vehicle data."""
+        with self.canbus_lock:
+            self.canbus_vehicle = canbus_vehicle
+
     def set_hardware_transform_applied(self, applied: bool):
         """Inform display that capture already applied rotation/flip."""
         self.hw_transform_applied = bool(applied)
@@ -684,6 +693,13 @@ class DrmKmsDisplay:
         with self._overlay_lock:
             with self.gps_lock:
                 cs = self.current_speed
+            
+            # Get fuel consumption data if available
+            fuel_consumed = None
+            with self.canbus_lock:
+                if self.canbus_vehicle and hasattr(self.canbus_vehicle, 'has_valid_fuel_data'):
+                    if self.canbus_vehicle.has_valid_fuel_data():
+                        fuel_consumed = self.canbus_vehicle.get_fuel_consumed_gallons(apply_safety_margin=True)
 
             rec_state = False
             if self.recording:
@@ -703,6 +719,9 @@ class DrmKmsDisplay:
                     and int(cs) != int(self._overlay_last_speed)
                 )
                 or self._overlay_last_rec_state != rec_state
+                or (fuel_consumed is not None and 
+                    (not hasattr(self, '_overlay_last_fuel') or 
+                     abs((fuel_consumed - (self._overlay_last_fuel or 0))) > 0.001))
             )
 
             if needs_update:
@@ -716,6 +735,7 @@ class DrmKmsDisplay:
                 self._overlay_last_time_sec = now_sec
                 self._overlay_last_speed = cs
                 self._overlay_last_rec_state = rec_state
+                self._overlay_last_fuel = fuel_consumed
                 render_ms = (time.time() - t_or_start) * 1000.0
 
             blend_mask = self._blended_overlay
@@ -791,6 +811,26 @@ class DrmKmsDisplay:
                 else:
                     speed_text = f"{cs * 1.60934:.0f} KPH"
                 self._draw_text_with_bg(draw, speed_text, self.config.overlay_speed_pos, self.config.overlay_font_color, self.font)
+        
+        # Display fuel consumption if enabled and available
+        if getattr(self.config, 'display_fuel_consumed', False):
+            with self.canbus_lock:
+                if self.canbus_vehicle and hasattr(self.canbus_vehicle, 'has_valid_fuel_data'):
+                    if self.canbus_vehicle.has_valid_fuel_data():
+                        # Get fuel consumed with safety margin
+                        fuel_consumed = self.canbus_vehicle.get_fuel_consumed_gallons(apply_safety_margin=True)
+                        
+                        # Format based on config
+                        decimals = getattr(self.config, 'fuel_display_decimals', 3)
+                        if getattr(self.config, 'fuel_display_unit', 'gallons') == 'gallons':
+                            fuel_text = f"Fuel: {fuel_consumed:.{decimals}f} gal"
+                        else:
+                            fuel_liters = self.canbus_vehicle.get_fuel_consumed_liters(apply_safety_margin=True)
+                            fuel_text = f"Fuel: {fuel_liters:.{decimals}f} L"
+                        
+                        # Position fuel display below speed
+                        fuel_pos = getattr(self.config, 'fuel_overlay_position', (20, 140))
+                        self._draw_text_with_bg(draw, fuel_text, fuel_pos, self.config.overlay_font_color, self.font)
 
         if rec_state:
             rec_x, rec_y = self.config.overlay_rec_indicator_pos

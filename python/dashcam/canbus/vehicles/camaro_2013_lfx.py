@@ -34,6 +34,10 @@ class CamaroVehicleData:
     fuel_level: Optional[float] = None  # Percent
     fuel_flow_rate: Optional[float] = None  # L/h
     
+    # Fuel consumption tracking
+    fuel_consumed_liters: float = 0.0  # Total fuel consumed since reset (liters)
+    last_fuel_update_time: Optional[float] = None  # Timestamp of last fuel flow update
+    
     # Battery/electrical
     battery_voltage: Optional[float] = None  # Volts
     
@@ -61,6 +65,8 @@ class CamaroVehicleData:
             'transmission_gear': self.transmission_gear,
             'fuel_level_percent': self.fuel_level,
             'fuel_flow_rate': self.fuel_flow_rate,
+            'fuel_consumed_liters': self.fuel_consumed_liters,
+            'fuel_consumed_gallons': self.fuel_consumed_liters / 3.78541 if self.fuel_consumed_liters else 0.0,
             'battery_voltage': self.battery_voltage,
             'mil_status': self.mil_status,
             'dtc_count': self.dtc_count,
@@ -108,6 +114,9 @@ class CamaroCANBus:
         
         # Vehicle data
         self.vehicle_data = CamaroVehicleData()
+        
+        # Fuel auto-reset tracking
+        self._fuel_reset_timer_start = None  # Track when fuel level went above threshold
         
         # State
         self.started = False
@@ -251,14 +260,51 @@ class CamaroCANBus:
         Byte 1-2: Fuel flow rate
         """
         try:
+            current_time = time.time()
+            
+            # Parse fuel level
             if len(msg.data) >= 1:
                 self.vehicle_data.fuel_level = (msg.data[0] / 255.0) * 100.0
-                
+            
+            # Parse fuel flow rate and calculate consumption
             if len(msg.data) >= 3:
+                # Decode fuel flow rate
                 flow_raw = (msg.data[1] << 8) | msg.data[2]
-                self.vehicle_data.fuel_flow_rate = flow_raw / 100.0
+                # Apply conversion factor from config (adjustable for testing)
+                conversion_factor = getattr(
+                    self.config, 
+                    'fuel_flow_conversion_factor', 
+                    0.01  # Default fallback
+                )
+                self.vehicle_data.fuel_flow_rate = flow_raw * conversion_factor  # L/h
                 
-            self.vehicle_data.last_update = time.time()
+                # Calculate fuel consumed since last update
+                if (self.vehicle_data.last_fuel_update_time is not None and 
+                    self.vehicle_data.fuel_flow_rate is not None and
+                    self.vehicle_data.fuel_flow_rate > 0):
+                    
+                    # Time elapsed since last update (in hours)
+                    time_delta_hours = (current_time - self.vehicle_data.last_fuel_update_time) / 3600.0
+                    
+                    # Fuel consumed in this interval (liters)
+                    fuel_delta = self.vehicle_data.fuel_flow_rate * time_delta_hours
+                    
+                    # Add to cumulative total
+                    self.vehicle_data.fuel_consumed_liters += fuel_delta
+                    
+                    self.logger.debug(
+                        f"Fuel: flow={self.vehicle_data.fuel_flow_rate:.2f} L/h, "
+                        f"delta={fuel_delta:.6f} L, total={self.vehicle_data.fuel_consumed_liters:.3f} L"
+                    )
+                
+                # Update timestamp for next calculation
+                self.vehicle_data.last_fuel_update_time = current_time
+            
+            # Check for auto-reset when fuel tank is filled
+            if getattr(self.config, 'fuel_auto_reset_enabled', False):
+                self._check_fuel_auto_reset(current_time)
+                
+            self.vehicle_data.last_update = current_time
                 
         except Exception as e:
             self.logger.error(f"Error parsing fuel system message: {e}")
@@ -284,6 +330,94 @@ class CamaroCANBus:
                 
         except Exception as e:
             self.logger.error(f"Error parsing BCM data message: {e}")
+    
+    def _check_fuel_auto_reset(self, current_time: float):
+        """
+        Check if fuel consumption should be auto-reset based on fuel level
+        
+        Resets if fuel level stays above threshold for configured duration
+        """
+        threshold = getattr(self.config, 'fuel_auto_reset_threshold', 95.0)
+        duration = getattr(self.config, 'fuel_auto_reset_duration', 5.0)
+        
+        if self.vehicle_data.fuel_level is not None:
+            if self.vehicle_data.fuel_level >= threshold:
+                # Fuel level is above threshold
+                if self._fuel_reset_timer_start is None:
+                    # Start the timer
+                    self._fuel_reset_timer_start = current_time
+                    self.logger.info(
+                        f"Fuel level at {self.vehicle_data.fuel_level:.1f}% - "
+                        f"starting auto-reset timer"
+                    )
+                elif (current_time - self._fuel_reset_timer_start) >= duration:
+                    # Timer has elapsed - reset fuel consumption
+                    old_consumed = self.vehicle_data.fuel_consumed_liters
+                    self.reset_fuel_consumption()
+                    self.logger.info(
+                        f"Auto-reset fuel consumption triggered "
+                        f"(was {old_consumed:.3f} L, fuel level {self.vehicle_data.fuel_level:.1f}%)"
+                    )
+                    self._fuel_reset_timer_start = None
+            else:
+                # Fuel level dropped below threshold - cancel timer
+                if self._fuel_reset_timer_start is not None:
+                    self.logger.debug(
+                        f"Fuel level dropped to {self.vehicle_data.fuel_level:.1f}% - "
+                        f"canceling auto-reset timer"
+                    )
+                self._fuel_reset_timer_start = None
+    
+    def reset_fuel_consumption(self):
+        """Manually reset fuel consumption counter"""
+        self.vehicle_data.fuel_consumed_liters = 0.0
+        self.vehicle_data.last_fuel_update_time = time.time()
+        self._fuel_reset_timer_start = None
+        self.logger.info("Fuel consumption counter reset to 0.0 L")
+    
+    def get_fuel_consumed_gallons(self, apply_safety_margin: bool = True) -> float:
+        """
+        Get fuel consumed in gallons
+        
+        Args:
+            apply_safety_margin: If True, apply safety margin from config
+            
+        Returns:
+            Fuel consumed in gallons
+        """
+        liters = self.vehicle_data.fuel_consumed_liters
+        gallons = liters / 3.78541  # Convert L to gallons
+        
+        if apply_safety_margin:
+            safety_margin = getattr(self.config, 'fuel_safety_margin', 1.025)
+            gallons *= safety_margin
+        
+        return gallons
+    
+    def get_fuel_consumed_liters(self, apply_safety_margin: bool = True) -> float:
+        """
+        Get fuel consumed in liters
+        
+        Args:
+            apply_safety_margin: If True, apply safety margin from config
+            
+        Returns:
+            Fuel consumed in liters
+        """
+        liters = self.vehicle_data.fuel_consumed_liters
+        
+        if apply_safety_margin:
+            safety_margin = getattr(self.config, 'fuel_safety_margin', 1.025)
+            liters *= safety_margin
+        
+        return liters
+    
+    def has_valid_fuel_data(self) -> bool:
+        """Check if we have valid fuel consumption data"""
+        return (
+            self.vehicle_data.last_fuel_update_time is not None and
+            self.vehicle_data.fuel_flow_rate is not None
+        )
     
     def get_vehicle_data(self) -> CamaroVehicleData:
         """Get current vehicle data"""

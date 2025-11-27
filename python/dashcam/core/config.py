@@ -165,6 +165,31 @@ class Config:
         self.canbus_log_interval = 1.0  # Log CAN data every second
         
         # ==========================================
+        # Fuel Consumption Configuration
+        # ==========================================
+        # Display fuel consumption on overlay
+        self.display_fuel_consumed = True  # Show fuel consumed since reset
+        self.fuel_overlay_position = (20, 140)  # Position below speed (y=140)
+        
+        # Fuel calculation parameters (adjustable after testing)
+        # These are used to decode the 0x3D1 CAN message fuel flow rate
+        self.fuel_flow_conversion_factor = 0.01  # Convert raw value to L/h (VERIFY THIS!)
+        # The current decoding is: fuel_flow_rate = ((byte1 << 8) | byte2) * conversion_factor
+        # You may need to adjust this after testing with known fuel consumption
+        
+        # Safety margin to account for variance and prevent running out of gas
+        self.fuel_safety_margin = 1.025  # Add 2.5% to displayed value (not cumulative)
+        
+        # Auto-reset fuel consumption when tank is refilled
+        self.fuel_auto_reset_enabled = True  # Automatically reset when fuel tank is filled
+        self.fuel_auto_reset_threshold = 95.0  # Reset if fuel level >= 95% for sustained period
+        self.fuel_auto_reset_duration = 5.0  # Fuel level must stay above threshold for 5 seconds
+        
+        # Fuel display formatting
+        self.fuel_display_unit = "gallons"  # "gallons" or "liters"
+        self.fuel_display_decimals = 3  # Show 3 decimal places (0.001 gal precision)
+        
+        # ==========================================
         # Performance Configuration
         # ==========================================
         # Buffer sizes
