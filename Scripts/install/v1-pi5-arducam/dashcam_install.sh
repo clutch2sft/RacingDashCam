@@ -760,20 +760,21 @@ echo -e "${GREEN}✓ Systemd service created and enabled${NC}"
 echo ""
 echo -e "${GREEN}Step 14: Disabling screen blanking...${NC}"
 
-# Add to rc.local
+# Add to rc.local. Use tty0 with TERM=linux so setterm does not complain
+# when no controlling terminal is present (e.g., when service stops).
 if [ ! -f /etc/rc.local ]; then
     cat > /etc/rc.local << 'EOF'
 #!/bin/bash
 # Disable screen blanking
-setterm -blank 0 -powerdown 0 -powersave off > /dev/tty1 2>&1 || true
-echo -e "\033[9;0]" > /dev/tty0 2>&1 || true
+TERM=linux setterm -blank 0 -powerdown 0 -powersave off > /dev/tty0 2>/dev/null || true
+echo -e "\033[9;0]" > /dev/tty0 2>/dev/null || true
 
 exit 0
 EOF
     chmod +x /etc/rc.local
 else
     if ! grep -q "screen blanking" /etc/rc.local; then
-        sed -i '/exit 0/i # Disable screen blanking\nsetterm -blank 0 -powerdown 0 -powersave off > /dev/tty1 2>&1 || true\necho -e "\\033[9;0]" > /dev/tty0 2>&1 || true\n' /etc/rc.local
+        sed -i '/exit 0/i # Disable screen blanking\nTERM=linux setterm -blank 0 -powerdown 0 -powersave off > /dev/tty0 2>\\/dev\\/null || true\necho -e "\\033[9;0]" > /dev/tty0 2>\\/dev\\/null || true\n' /etc/rc.local
     fi
 fi
 
