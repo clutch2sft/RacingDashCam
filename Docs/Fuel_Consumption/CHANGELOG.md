@@ -408,3 +408,41 @@ Fuel: flow=2.34 L/h, delta=0.000065 L, total=0.123 L
 5. ✅ `FUEL_TESTING_QUICK_REF.md` - Quick testing reference
 6. ✅ `FUEL_IMPLEMENTATION_SUMMARY.md` - High-level summary
 7. ✅ `CHANGELOG.md` - This detailed changelog
+
+---
+
+## UPDATE: Auto-Reset Logic Fix (v1.1)
+
+### Problem Identified
+Original auto-reset logic would reset fuel consumption every time the car was started with a full tank, not just when refueling.
+
+### Fix Applied
+Added state transition detection to require fuel level to go from below threshold (driving) to above threshold (refueling) before triggering reset.
+
+### Changes in `camaro_2013_lfx.py`
+
+#### Added State Tracking Variable
+```python
+self._fuel_was_below_threshold = False  # Track if we've driven
+```
+
+#### Modified `_check_fuel_auto_reset()` Logic
+- Now requires `fuel_level < threshold` at some point before reset can trigger
+- Detects the transition from "not full" → "full" (refueling event)
+- Resets the flag after successful auto-reset to require another cycle
+
+#### Updated `reset_fuel_consumption()` 
+- Does NOT reset `_fuel_was_below_threshold` on manual reset
+- Allows manual reset even when tank is full
+- Preserves auto-reset capability for next cycle
+
+### New Behavior
+
+**Scenario 1: Start with full tank** → NO auto-reset ✓  
+**Scenario 2: Drive then refuel** → Auto-reset after 5 seconds ✓  
+**Scenario 3: Top-off from 80% to 100%** → Auto-reset after 5 seconds ✓  
+**Scenario 4: Fuel sensor glitch** → NO auto-reset (5 sec duration) ✓  
+
+### Files Updated
+- `camaro_2013_lfx.py` - Fixed auto-reset logic
+- `AUTO_RESET_FIX.md` - Detailed explanation of the fix
