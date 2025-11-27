@@ -87,10 +87,11 @@ class CameraRecorder:
                 )
                 camera_config = self.camera.create_video_configuration(
                     main={"size": (self.width, self.height), "format": "YUV420"},  # For encoder
-                    # Explicitly request RGB output from ISP to avoid per-frame BGR->RGB swaps
+                    # Request BGR888 explicitly; some ISP builds return BGR even when RGB is asked.
+                    # We swap to RGB on the display side when display_input_is_bgr=True.
                     lores={
                         "size": (self.width, self.height),
-                        "format": "RGB888",
+                        "format": "BGR888",
                         **(
                             {"colour_space": ColourSpace.Srgb}
                             if ColourSpace is not None and hasattr(ColourSpace, "Srgb")
