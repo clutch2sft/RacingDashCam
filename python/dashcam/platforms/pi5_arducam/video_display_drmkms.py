@@ -257,6 +257,19 @@ class DrmKmsDisplay:
         # Whether the capture path already applied rotation/flip in hardware
         self.hw_transform_applied = False
 
+        # Profiling and FPS tracking (glass-to-glass style markers)
+        self._prof_enabled = True
+        self._prof_frames = 0
+        self._prof_capture = 0.0
+        self._prof_transform = 0.0
+        self._prof_overlay_render = 0.0
+        self._prof_blend = 0.0
+        self._prof_blit = 0.0
+        self._prof_other = 0.0
+        self.fps_frame_count = 0
+        self.actual_fps = 0.0
+        self.last_fps_calc = time.time()
+
         # Overlay reuse from fb0 path
         self.font = None
         self.font_small = None
@@ -493,8 +506,12 @@ class DrmKmsDisplay:
         while self.running and not self.stop_event.is_set():
             loop_start = time.time()
             try:
+                t_get_start = time.time()
                 with self.frame_lock:
                     frame = self.current_frame
+                t_get_end = time.time()
+                if self._prof_enabled:
+                    self._prof_capture += (t_get_end - t_get_start) * 1000.0
                 if frame is None:
                     time.sleep(0.01)
                     continue
@@ -502,6 +519,7 @@ class DrmKmsDisplay:
                 frame = self._ensure_rgb(frame)
 
                 if not self.hw_transform_applied:
+                    t_tf_start = time.time()
                     try:
                         cam_cfg = self.config.get_camera_config(
                             getattr(self.config, "display_camera_index", 1)
@@ -521,13 +539,55 @@ class DrmKmsDisplay:
                         vflip,
                         getattr(self.config, "display_mirror_mode", False),
                     )
+                    t_tf_end = time.time()
+                    if self._prof_enabled:
+                        self._prof_transform += (t_tf_end - t_tf_start) * 1000.0
 
                 if self.config.overlay_enabled:
+                    t_ov_start = time.time()
                     frame = self._maybe_add_overlay(frame)
+                    t_ov_end = time.time()
+                    if self._prof_enabled:
+                        # Overlay helper itself includes render+blend time; treat combined.
+                        self._prof_overlay_render += (t_ov_end - t_ov_start) * 1000.0
 
+                t_blit_start = time.time()
                 self._blit_frame(frame)
+                t_blit_end = time.time()
+                if self._prof_enabled:
+                    self._prof_blit += (t_blit_end - t_blit_start) * 1000.0
             except Exception as exc:
                 self.logger.debug(f"DRM display loop error: {exc}")
+
+            if self._prof_enabled:
+                self._prof_frames += 1
+                self.fps_frame_count += 1
+                if time.time() - self.last_fps_calc >= 1.0:
+                    interval = time.time() - self.last_fps_calc
+                    frames = self.fps_frame_count
+                    self.actual_fps = frames / interval if interval > 0 else 0.0
+                    if self._prof_frames > 0:
+                        avg_capture = self._prof_capture / max(1, self._prof_frames)
+                        avg_transform = self._prof_transform / max(1, self._prof_frames)
+                        avg_overlay = self._prof_overlay_render / max(1, self._prof_frames)
+                        avg_blit = self._prof_blit / max(1, self._prof_frames)
+                        avg_other = max(
+                            0.0,
+                            (interval * 1000.0) / max(1, frames) - (avg_capture + avg_transform + avg_overlay + avg_blit),
+                        )
+                        self.logger.debug(
+                            f"DRM Display FPS: {self.actual_fps:.1f} | timings (ms/frame): "
+                            f"capture={avg_capture:.1f} transform={avg_transform:.1f} "
+                            f"overlay={avg_overlay:.1f} blit={avg_blit:.1f} other~={avg_other:.1f}"
+                        )
+                    self.fps_frame_count = 0
+                    self.last_fps_calc = time.time()
+                    self._prof_frames = 0
+                    self._prof_capture = 0.0
+                    self._prof_transform = 0.0
+                    self._prof_overlay_render = 0.0
+                    self._prof_blit = 0.0
+                    self._prof_other = 0.0
 
             elapsed = time.time() - loop_start
             sleep_time = target_frame_time - elapsed
