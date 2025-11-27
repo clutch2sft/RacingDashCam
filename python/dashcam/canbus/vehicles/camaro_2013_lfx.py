@@ -117,6 +117,7 @@ class CamaroCANBus:
         
         # Fuel auto-reset tracking
         self._fuel_reset_timer_start = None  # Track when fuel level went above threshold
+        self._fuel_was_below_threshold = False  # Track if we've been below threshold (driven)
         
         # State
         self.started = False
@@ -335,44 +336,54 @@ class CamaroCANBus:
         """
         Check if fuel consumption should be auto-reset based on fuel level
         
-        Resets if fuel level stays above threshold for configured duration
+        Requires fuel level to transition from below threshold to above threshold,
+        then stay above threshold for configured duration. This prevents false
+        resets when starting the car with a full tank.
         """
         threshold = getattr(self.config, 'fuel_auto_reset_threshold', 95.0)
         duration = getattr(self.config, 'fuel_auto_reset_duration', 5.0)
         
         if self.vehicle_data.fuel_level is not None:
-            if self.vehicle_data.fuel_level >= threshold:
-                # Fuel level is above threshold
-                if self._fuel_reset_timer_start is None:
-                    # Start the timer
-                    self._fuel_reset_timer_start = current_time
-                    self.logger.info(
-                        f"Fuel level at {self.vehicle_data.fuel_level:.1f}% - "
-                        f"starting auto-reset timer"
-                    )
-                elif (current_time - self._fuel_reset_timer_start) >= duration:
-                    # Timer has elapsed - reset fuel consumption
-                    old_consumed = self.vehicle_data.fuel_consumed_liters
-                    self.reset_fuel_consumption()
-                    self.logger.info(
-                        f"Auto-reset fuel consumption triggered "
-                        f"(was {old_consumed:.3f} L, fuel level {self.vehicle_data.fuel_level:.1f}%)"
-                    )
-                    self._fuel_reset_timer_start = None
-            else:
-                # Fuel level dropped below threshold - cancel timer
+            # Track if we've ever been below the threshold (i.e., we've driven)
+            if self.vehicle_data.fuel_level < threshold:
+                self._fuel_was_below_threshold = True
+                # Cancel any active timer since we're below threshold
                 if self._fuel_reset_timer_start is not None:
                     self.logger.debug(
                         f"Fuel level dropped to {self.vehicle_data.fuel_level:.1f}% - "
                         f"canceling auto-reset timer"
                     )
-                self._fuel_reset_timer_start = None
+                    self._fuel_reset_timer_start = None
+            
+            # Only consider reset if we've previously been below threshold
+            # This ensures we detect the TRANSITION from low to high (refueling)
+            elif self.vehicle_data.fuel_level >= threshold and self._fuel_was_below_threshold:
+                # Fuel level is above threshold AND we've driven before
+                if self._fuel_reset_timer_start is None:
+                    # Start the timer - detected potential refueling
+                    self._fuel_reset_timer_start = current_time
+                    self.logger.info(
+                        f"Fuel level at {self.vehicle_data.fuel_level:.1f}% after being below "
+                        f"{threshold:.1f}% - starting auto-reset timer ({duration:.1f}s)"
+                    )
+                elif (current_time - self._fuel_reset_timer_start) >= duration:
+                    # Timer has elapsed - confirmed refueling, reset fuel consumption
+                    old_consumed = self.vehicle_data.fuel_consumed_liters
+                    self.reset_fuel_consumption()
+                    # Also reset the "was below" flag so we need another transition
+                    self._fuel_was_below_threshold = False
+                    self.logger.info(
+                        f"Auto-reset fuel consumption triggered "
+                        f"(was {old_consumed:.3f} L, fuel level {self.vehicle_data.fuel_level:.1f}%)"
+                    )
     
     def reset_fuel_consumption(self):
         """Manually reset fuel consumption counter"""
         self.vehicle_data.fuel_consumed_liters = 0.0
         self.vehicle_data.last_fuel_update_time = time.time()
         self._fuel_reset_timer_start = None
+        # Don't reset _fuel_was_below_threshold on manual reset
+        # This allows manual reset even with full tank
         self.logger.info("Fuel consumption counter reset to 0.0 L")
     
     def get_fuel_consumed_gallons(self, apply_safety_margin: bool = True) -> float:
