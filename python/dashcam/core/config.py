@@ -84,6 +84,10 @@ class Config:
         self.display_width = 1920
         self.display_height = 1080
         self.display_fps = 15  # Lower default to 15fps for reduced CPU usage
+        # Display backend: "fbdev" (RGB565 framebuffer) or "drm" (DRM/KMS XRGB8888)
+        self.display_backend = "drm"
+        # DRM device path (used when display_backend == "drm")
+        self.display_drm_card = "/dev/dri/card1"
         
         # Display format (for direct framebuffer rendering)
         self.use_framebuffer = True  # Direct rendering to /dev/fb0
@@ -315,6 +319,7 @@ Cameras:
                      Recording: {self.rear_camera_recording_enabled}
 Display:
   Resolution: {self.display_width}x{self.display_height}
+  Backend: {self.display_backend}
   Camera: {'Rear' if self.display_camera_index == 1 else 'Front'}
   Mirror Mode: {self.display_mirror_mode}
 Recording:
