@@ -17,11 +17,17 @@ import numpy as np
 
 try:
     from picamera2 import Picamera2
+    try:
+        # ColourSpace is optional on some builds; fall back gracefully.
+        from picamera2 import ColourSpace  # type: ignore
+    except Exception:
+        ColourSpace = None  # type: ignore
     from picamera2.encoders import H264Encoder, Quality
     from picamera2.outputs import FfmpegOutput
     PICAMERA2_AVAILABLE = True
 except ImportError:
     PICAMERA2_AVAILABLE = False
+    ColourSpace = None  # type: ignore
     logging.warning("Picamera2 not available")
 
 
@@ -81,7 +87,17 @@ class CameraRecorder:
                 )
                 camera_config = self.camera.create_video_configuration(
                     main={"size": (self.width, self.height), "format": "YUV420"},  # For encoder
-                    lores={"size": (self.width, self.height), "format": "RGB888"},  # For display
+                    # Request BGR888 explicitly; some ISP builds return BGR even when RGB is asked.
+                    # We swap to RGB on the display side when display_input_is_bgr=True.
+                    lores={
+                        "size": (self.width, self.height),
+                        "format": "BGR888",
+                        **(
+                            {"colour_space": ColourSpace.Srgb}
+                            if ColourSpace is not None and hasattr(ColourSpace, "Srgb")
+                            else {}
+                        ),
+                    },
                     controls={
                         "FrameRate": self.fps,
                     }

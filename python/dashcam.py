@@ -100,8 +100,23 @@ class DashcamSystem:
             
             # Initialize display (import lazily to avoid circular imports)
             self.logger.info("Starting display...")
-            from dashcam.platforms.pi5_arducam.video_display import VideoDisplay
-            self.display = VideoDisplay(self.config)
+            backend = getattr(self.config, "display_backend", "fbdev")
+            try:
+                if backend == "drm":
+                    from dashcam.platforms.pi5_arducam.video_display_drmkms import DrmKmsDisplay
+
+                    card_path = getattr(self.config, "display_drm_card", "/dev/dri/card1")
+                    self.logger.info(f"Using DRM/KMS display backend (card={card_path})")
+                    self.display = DrmKmsDisplay(self.config, card_path=card_path)
+                else:
+                    from dashcam.platforms.pi5_arducam.video_display import VideoDisplay
+
+                    self.logger.info("Using fbdev display backend (/dev/fb0)")
+                    self.display = VideoDisplay(self.config)
+            except Exception as e:
+                self.logger.error(f"Failed to initialize display backend '{backend}': {e}")
+                raise
+
             if not self.display.start():
                 raise RuntimeError("Failed to start display")
             
