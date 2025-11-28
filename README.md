@@ -1,3 +1,24 @@
+Grassroots Racing Data Platform
+
+An open source project built by racers, for racers.
+
+Welcome to the Grassroots Racing Data Platform – a community-driven initiative dedicated to democratizing motorsport data collection and analysis. We believe that cutting-edge telemetry and performance insights shouldn't be exclusive to big-budget racing teams.
+
+Our Mission
+Whether you're campaigning a weekend warrior track car, building a competitive rally machine, or developing the next generation of grassroots racing technology, this project empowers you to:
+
+Collect professional-grade data without professional-grade budgets
+Analyze your performance with powerful, accessible tools
+Collaborate with a community of like-minded racers and developers
+Innovate through open source contributions that benefit everyone
+
+This is more than just a software project – it's a movement to level the playing field and give every racer access to the tools they need to improve, compete, and win.
+Built on Community Power
+
+By leveraging the collective knowledge, creativity, and passion of the grassroots racing community, we're building DIY data collection and analysis systems that rival commercial solutions. Every contribution, from code to documentation to testing on track, helps make racing data accessible to all.
+
+Ready to join the pit crew? Dive into the docs below and let's build something amazing together.
+
 # Active Dash Mirror - Racing Dashcam System
 
 Raspberry Pi 5-based dashcam system with dual cameras, CAN bus vehicle data, and GPS integration.
