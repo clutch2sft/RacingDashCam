@@ -282,6 +282,7 @@ class DrmKmsDisplay:
         self._prof_blend = 0.0
         self._prof_blit = 0.0
         self._prof_other = 0.0
+        self.frame_count = 0
         self.fps_frame_count = 0
         self.actual_fps = 0.0
         self.last_fps_calc = time.time()
@@ -536,6 +537,7 @@ class DrmKmsDisplay:
     def update_frame(self, frame: np.ndarray):
         with self.frame_lock:
             self.current_frame = frame
+            self.frame_count += 1
 
     def set_recording(self, recording: bool):
         self.recording = recording
@@ -552,6 +554,24 @@ class DrmKmsDisplay:
     def set_hardware_transform_applied(self, applied: bool):
         """Inform display that capture already applied rotation/flip."""
         self.hw_transform_applied = bool(applied)
+
+    def get_stats(self) -> dict:
+        target_fps = getattr(self.config, "display_fps", None)
+        try:
+            if not target_fps and self.mode:
+                target_fps = getattr(self.mode, "vrefresh", None)
+        except Exception:
+            target_fps = None
+
+        return {
+            "frame_count": self.frame_count,
+            "recording": self.recording,
+            "width": self.width,
+            "height": self.height,
+            "target_fps": target_fps,
+            "actual_fps": self.actual_fps,
+            "mirror_mode": getattr(self.config, "display_mirror_mode", False),
+        }
 
     # ------------------------------------------------------------------ Display loop
     def _display_loop(self):
