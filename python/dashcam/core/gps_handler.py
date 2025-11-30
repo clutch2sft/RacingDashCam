@@ -57,6 +57,7 @@ class GPSHandler:
         # Logging
         self.log_file = None
         self.log_path = os.path.join(config.log_dir, f"gps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+        self.next_log_time = None
         
         # Recovery
         self.retry_count = 0
@@ -89,6 +90,7 @@ class GPSHandler:
             # Reset runtime state for a fresh start
             self.retry_count = 0
             self.last_data_time = None
+            self.next_log_time = time.time() + max(0.1, float(self.config.gps_log_interval))
             
             # Open log file
             self.log_file = open(self.log_path, 'w')
@@ -145,9 +147,12 @@ class GPSHandler:
                             self.last_data_time = time.time()
                             
                             # Log data
-                            if time.time() % self.config.gps_log_interval < 0.1:
+                            now = time.time()
+                            if self.next_log_time and now >= self.next_log_time:
                                 self._log_data(first_entry)
                                 first_entry = False
+                                # Keep a steady cadence even if we miss a tick
+                                self.next_log_time = now + max(0.1, float(self.config.gps_log_interval))
                     
                     # Check for stale data only after we have seen at least one report
                     if self.last_data_time and (time.time() - self.last_data_time > 10.0):
@@ -229,6 +234,7 @@ class GPSHandler:
             self.session = gps.gps(mode=gps.WATCH_ENABLE | gps.WATCH_NEWSTYLE)
             self.retry_count = 0
             self.last_data_time = None
+            self.next_log_time = time.time() + max(0.1, float(self.config.gps_log_interval))
             self.logger.info("GPS recovered successfully")
             return True
             
