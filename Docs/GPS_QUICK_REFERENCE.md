@@ -77,6 +77,27 @@ self.speed_recording_enabled = False        # Set True to record only when movin
 self.start_recording_speed_mph = 5.0        # Speed threshold for recording
 ```
 
+## ⏱️ Set 10 Hz Update Rate (LC29H AA/BS)
+
+> Only GGA/RMC output at the faster rate; other NMEA sentences stay at 1 Hz. `gpspipe -w` will still show `cycle: 1.00` for the NMEA driver—trust the TPV timestamps.
+
+```bash
+sudo systemctl stop gpsd gpsd.socket dashcam
+stty -F /dev/ttyAMA0 115200 raw -echo
+
+# Set fix interval to 100 ms (10 Hz) and verify
+( printf '$PAIR050,100*22\r\n'; sleep 0.2; printf '$PAIR051*3E\r\n'; ) | sudo tee /dev/ttyAMA0 >/dev/null
+# Expected ACKs: $PAIR001,050,0*3E and $PAIR051,100*23
+
+# Save to NVM so it survives reboot
+echo -n '$PQTMSAVEPAR*5A\r\n' | sudo tee /dev/ttyAMA0 >/dev/null
+
+sudo systemctl start gpsd.socket gpsd dashcam
+
+# Verify timing (~0.1 s steps); multiple TPVs per second is normal
+gpspipe -w -n 20 | jq -r 'select(.class=="TPV") | .time'
+```
+
 ## 🚗 Racing Dashboard Features
 
 - **Real-time Speed Display**: Speed overlay on video
@@ -130,7 +151,7 @@ Use QGNSS software to load EPO data for 5-second cold start (vs 26 seconds stand
 - **Module**: Waveshare LC29H GPS/RTK HAT
 - **Interface**: UART (default) or USB
 - **Baud Rate**: 9600 - 3000000 bps (115200 default)
-- **Update Rate**: 1 Hz (GPS), up to 1 Hz (RTK)
+- **Update Rate**: 1–10 Hz (GGA/RMC can run at 10 Hz), RTK may be limited by firmware
 - **Accuracy**: 1m CEP (GPS), 0.01m (RTK)
 - **Cold Start**: ~26 seconds
 - **Hot Start**: ~1 second
