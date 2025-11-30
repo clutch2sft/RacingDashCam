@@ -294,6 +294,7 @@ class DrmKmsDisplay:
         self._overlay_last_time_sec = None
         self._overlay_last_speed = None
         self._overlay_last_rec_state = None
+        self._overlay_last_can_state = None
         self._overlay_lock = Lock()
         self._blended_overlay = None
         self.recording = False
@@ -729,6 +730,8 @@ class DrmKmsDisplay:
                     blink_rate = max(0.01, float(self.config.rec_indicator_blink_rate))
                     rec_state = (int(time.time() / blink_rate) % 2) == 0
 
+            can_status = self._get_canbus_status()
+
             needs_update = (
                 self._overlay_rgba is None
                 or self._overlay_last_time_sec != now_sec
@@ -739,6 +742,7 @@ class DrmKmsDisplay:
                     and int(cs) != int(self._overlay_last_speed)
                 )
                 or self._overlay_last_rec_state != rec_state
+                or self._overlay_last_can_state != can_status
                 or (fuel_consumed is not None and 
                     (not hasattr(self, '_overlay_last_fuel') or 
                      abs((fuel_consumed - (self._overlay_last_fuel or 0))) > 0.001))
@@ -747,7 +751,7 @@ class DrmKmsDisplay:
             if needs_update:
                 t_or_start = time.time()
                 try:
-                    self._overlay_rgba = self._render_overlay_rgba(rec_state)
+                    self._overlay_rgba = self._render_overlay_rgba(rec_state, can_status)
                     self._blended_overlay = self._precompute_blend_mask(self._overlay_rgba)
                 except Exception:
                     self._overlay_rgba = None
@@ -756,6 +760,7 @@ class DrmKmsDisplay:
                 self._overlay_last_speed = cs
                 self._overlay_last_rec_state = rec_state
                 self._overlay_last_fuel = fuel_consumed
+                self._overlay_last_can_state = can_status
                 render_ms = (time.time() - t_or_start) * 1000.0
 
             blend_mask = self._blended_overlay
@@ -808,7 +813,7 @@ class DrmKmsDisplay:
         except Exception:
             return frame
 
-    def _render_overlay_rgba(self, rec_state: bool) -> Optional[np.ndarray]:
+    def _render_overlay_rgba(self, rec_state: Optional[bool] = None, can_status: Optional[tuple] = None) -> Optional[np.ndarray]:
         if not self.config.overlay_enabled:
             return None
         img = Image.new("RGBA", (self.width, self.height), (0, 0, 0, 0))
@@ -832,6 +837,15 @@ class DrmKmsDisplay:
                     speed_text = f"{cs * 1.60934:.0f} KPH"
                 self._draw_text_with_bg(draw, speed_text, self.config.overlay_speed_pos, self.config.overlay_font_color, self.font)
         
+        if rec_state is None:
+            rec_state = False
+            if self.recording:
+                if not self.config.rec_indicator_blink:
+                    rec_state = True
+                else:
+                    blink_rate = max(0.01, float(self.config.rec_indicator_blink_rate))
+                    rec_state = (int(time.time() / blink_rate) % 2) == 0
+
         # Display fuel consumption if enabled and available
         if getattr(self.config, 'display_fuel_consumed', False):
             with self.canbus_lock:
@@ -859,7 +873,61 @@ class DrmKmsDisplay:
             rec_x -= text_width
             self._draw_text_with_bg(draw, self.config.rec_indicator_text, (rec_x, rec_y), self.config.rec_indicator_color, self.font)
 
+        if can_status is None:
+            can_status = self._get_canbus_status()
+
+        if can_status:
+            can_text, can_color = can_status
+            can_font = self.font_small or self.font
+            can_x, can_y = getattr(self.config, "overlay_can_status_pos", self.config.overlay_rec_indicator_pos)
+            text_bbox = draw.textbbox((0, 0), can_text, font=can_font)
+            text_width = text_bbox[2] - text_bbox[0]
+            can_x -= text_width
+            self._draw_text_with_bg(draw, can_text, (can_x, can_y), can_color, can_font)
+
         return np.array(img)
+
+    def _get_canbus_status(self) -> tuple[str, tuple[int, int, int]]:
+        """Return CAN bus status text and color for the overlay."""
+        disabled_text = getattr(self.config, "canbus_status_disabled_text", "CAN OFF")
+        connecting_text = getattr(self.config, "canbus_status_connecting_text", "CAN WAIT")
+        connected_text = getattr(self.config, "canbus_status_connected_text", "CAN OK")
+        stale_timeout = float(getattr(self.config, "canbus_status_stale_timeout", 3.0) or 3.0)
+
+        disabled_color = (180, 180, 180)
+        connecting_color = (255, 200, 0)
+        connected_color = (0, 200, 0)
+
+        if not getattr(self.config, "canbus_enabled", False):
+            return (disabled_text, disabled_color)
+
+        connected = False
+        last_message_time = 0.0
+        with self.canbus_lock:
+            vehicle = self.canbus_vehicle
+
+        if vehicle is not None:
+            try:
+                if hasattr(vehicle, "get_stats"):
+                    stats = vehicle.get_stats()
+                    connected = bool(stats.get("connected", False))
+                    last_message_time = float(stats.get("last_message_time") or 0.0)
+            except Exception:
+                pass
+
+            if not connected and hasattr(vehicle, "canbus"):
+                try:
+                    bus = vehicle.canbus
+                    connected = bool(getattr(bus, "connected", False))
+                    last_message_time = float(getattr(bus, "last_message_time", 0.0) or 0.0)
+                except Exception:
+                    pass
+
+        now = time.time()
+        if connected and last_message_time and now - last_message_time <= stale_timeout:
+            return (connected_text, connected_color)
+
+        return (connecting_text, connecting_color)
 
     def _blend_overlay(self, frame: np.ndarray, overlay_rgba: np.ndarray) -> np.ndarray:
         if overlay_rgba is None:

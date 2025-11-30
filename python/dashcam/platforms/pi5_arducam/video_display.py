@@ -98,12 +98,15 @@ class VideoDisplay:
         self.recording = False
         self.rec_blink_state = False
         self.last_blink_time = time.time()
+        self.canbus_vehicle = None
+        self.canbus_lock = Lock()
 
         # Overlay caching (to avoid re-rendering every frame)
         self._overlay_rgba = None  # Cached RGBA overlay as numpy array
         self._overlay_last_time_sec = None
         self._overlay_last_speed = None
         self._overlay_last_rec_state = None
+        self._overlay_last_can_state = None
         self._overlay_lock = Lock()
         
         # GPS data (optional)
@@ -246,6 +249,11 @@ class VideoDisplay:
         """Update GPS data for overlay display"""
         with self.gps_lock:
             self.current_speed = speed_mph
+
+    def set_canbus_vehicle(self, canbus_vehicle):
+        """Link CAN bus vehicle interface for overlay status/data."""
+        with self.canbus_lock:
+            self.canbus_vehicle = canbus_vehicle
     
     def _display_loop(self):
         """Main display loop"""
@@ -308,18 +316,21 @@ class VideoDisplay:
                                 blink_rate = max(0.01, float(self.config.rec_indicator_blink_rate))
                                 rec_state = (int(time.time() / blink_rate) % 2) == 0
 
+                        can_status = self._get_canbus_status()
+
                         needs_update = (
                             self._overlay_rgba is None
                             or self._overlay_last_time_sec != now_sec
                             or (self._overlay_last_speed is None and cs is not None)
                             or (cs is not None and self._overlay_last_speed is not None and int(cs) != int(self._overlay_last_speed))
                             or self._overlay_last_rec_state != rec_state
+                            or self._overlay_last_can_state != can_status
                         )
 
                         if needs_update:
                             t_or_start = time.time()
                             try:
-                                self._overlay_rgba = self._render_overlay_rgba()
+                                self._overlay_rgba = self._render_overlay_rgba(rec_state, can_status)
                                 # Pre-compute blended overlay regions when overlay changes
                                 self._blended_overlay = self._precompute_blend_mask(self._overlay_rgba)
                             except Exception as e:
@@ -333,6 +344,7 @@ class VideoDisplay:
                             self._overlay_last_time_sec = now_sec
                             self._overlay_last_speed = cs
                             self._overlay_last_rec_state = rec_state
+                            self._overlay_last_can_state = can_status
 
                     # Fast blend using pre-computed mask
                     if self._blended_overlay is not None:
@@ -480,7 +492,7 @@ class VideoDisplay:
         self._draw_text_with_bg(draw, time_str, self.config.overlay_time_pos, self.config.overlay_font_color, self.font)
         return np.array(img)
 
-    def _render_overlay_rgba(self) -> Optional[np.ndarray]:
+    def _render_overlay_rgba(self, rec_state: Optional[bool] = None, can_status: Optional[tuple] = None) -> Optional[np.ndarray]:
         """Render the overlay into an RGBA numpy array. This is called
         only when overlay content changes (time second, GPS speed, REC state).
         """
@@ -513,14 +525,15 @@ class VideoDisplay:
                 self._draw_text_with_bg(draw, speed_text, self.config.overlay_speed_pos, self.config.overlay_font_color, self.font)
 
         # REC indicator (respect blink rate)
-        rec_state = False
-        if self.recording:
-            if not self.config.rec_indicator_blink:
-                rec_state = True
-            else:
-                # Stateless blink based on current time
-                blink_rate = max(0.01, float(self.config.rec_indicator_blink_rate))
-                rec_state = (int(time.time() / blink_rate) % 2) == 0
+        if rec_state is None:
+            rec_state = False
+            if self.recording:
+                if not self.config.rec_indicator_blink:
+                    rec_state = True
+                else:
+                    # Stateless blink based on current time
+                    blink_rate = max(0.01, float(self.config.rec_indicator_blink_rate))
+                    rec_state = (int(time.time() / blink_rate) % 2) == 0
 
         if rec_state:
             rec_x, rec_y = self.config.overlay_rec_indicator_pos
@@ -529,7 +542,62 @@ class VideoDisplay:
             rec_x -= text_width
             self._draw_text_with_bg(draw, self.config.rec_indicator_text, (rec_x, rec_y), self.config.rec_indicator_color, self.font)
 
+        # CAN bus status indicator (always drawn when overlay enabled)
+        if can_status is None:
+            can_status = self._get_canbus_status()
+
+        if can_status:
+            can_text, can_color = can_status
+            can_font = self.font_small or self.font
+            can_x, can_y = getattr(self.config, "overlay_can_status_pos", self.config.overlay_rec_indicator_pos)
+            text_bbox = draw.textbbox((0, 0), can_text, font=can_font)
+            text_width = text_bbox[2] - text_bbox[0]
+            can_x -= text_width
+            self._draw_text_with_bg(draw, can_text, (can_x, can_y), can_color, can_font)
+
         return np.array(img)
+
+    def _get_canbus_status(self) -> tuple[str, tuple[int, int, int]]:
+        """Return CAN bus status text and color for the overlay."""
+        disabled_text = getattr(self.config, "canbus_status_disabled_text", "CAN OFF")
+        connecting_text = getattr(self.config, "canbus_status_connecting_text", "CAN WAIT")
+        connected_text = getattr(self.config, "canbus_status_connected_text", "CAN OK")
+        stale_timeout = float(getattr(self.config, "canbus_status_stale_timeout", 3.0) or 3.0)
+
+        disabled_color = (180, 180, 180)
+        connecting_color = (255, 200, 0)
+        connected_color = (0, 200, 0)
+
+        if not getattr(self.config, "canbus_enabled", False):
+            return (disabled_text, disabled_color)
+
+        connected = False
+        last_message_time = 0.0
+        with self.canbus_lock:
+            vehicle = self.canbus_vehicle
+
+        if vehicle is not None:
+            try:
+                if hasattr(vehicle, "get_stats"):
+                    stats = vehicle.get_stats()
+                    connected = bool(stats.get("connected", False))
+                    last_message_time = float(stats.get("last_message_time") or 0.0)
+            except Exception:
+                pass
+
+            if not connected and hasattr(vehicle, "canbus"):
+                try:
+                    bus = vehicle.canbus
+                    connected = bool(getattr(bus, "connected", False))
+                    last_message_time = float(getattr(bus, "last_message_time", 0.0) or 0.0)
+                except Exception:
+                    pass
+
+        now = time.time()
+        if connected and last_message_time and now - last_message_time <= stale_timeout:
+            return (connected_text, connected_color)
+
+        return (connecting_text, connecting_color)
 
     def _blend_overlay(self, frame: np.ndarray, overlay_rgba: np.ndarray) -> np.ndarray:
         """Alpha-blend RGBA overlay into RGB frame using NumPy (fast)."""

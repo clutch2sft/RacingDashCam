@@ -57,6 +57,7 @@ overlay:
   date_pos: [20, 60]
   speed_pos: [20, 100]
   rec_indicator_pos: [1820, 20]
+  can_status_pos: [1820, 60]
   font_size: 32
   font_color: [255, 255, 255]
   bg_color: [0, 0, 0]
@@ -68,10 +69,14 @@ overlay:
   shadow_color: [0, 0, 0]
   outline: true
   outline_color: [0, 0, 0]
-  rec_indicator_text: "⬤ REC"
+  rec_indicator_text: "*REC"
   rec_indicator_color: [255, 0, 0]
   rec_indicator_blink: false
   rec_indicator_blink_rate: 1.0
+  can_status_disabled_text: "CAN OFF"
+  can_status_connecting_text: "CAN WAIT"
+  can_status_connected_text: "CAN OK"
+  can_status_stale_timeout: 3.0
 
 gps:
   enabled: true

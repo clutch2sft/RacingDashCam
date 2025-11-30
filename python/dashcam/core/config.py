@@ -90,6 +90,7 @@ class Config:
         self.overlay_date_pos = (20, 60)
         self.overlay_speed_pos = (20, 100)
         self.overlay_rec_indicator_pos = (1820, 20)
+        self.overlay_can_status_pos = (1820, 60)
         self.overlay_font_size = 32
         self.overlay_font_color = (255, 255, 255)
         self.overlay_bg_color = (0, 0, 0)
@@ -101,10 +102,14 @@ class Config:
         self.overlay_shadow_color = (0, 0, 0)
         self.overlay_outline = True
         self.overlay_outline_color = (0, 0, 0)
-        self.rec_indicator_text = "⬤ REC"
+        self.rec_indicator_text = "*REC"
         self.rec_indicator_color = (255, 0, 0)
         self.rec_indicator_blink = False
         self.rec_indicator_blink_rate = 1.0
+        self.canbus_status_disabled_text = "CAN OFF"
+        self.canbus_status_connecting_text = "CAN WAIT"
+        self.canbus_status_connected_text = "CAN OK"
+        self.canbus_status_stale_timeout = 3.0
 
         # GPS Configuration
         self.gps_enabled = True
@@ -283,6 +288,7 @@ class Config:
                 "date_pos": "overlay_date_pos",
                 "speed_pos": "overlay_speed_pos",
                 "rec_indicator_pos": "overlay_rec_indicator_pos",
+                "can_status_pos": "overlay_can_status_pos",
                 "font_size": "overlay_font_size",
                 "font_color": "overlay_font_color",
                 "bg_color": "overlay_bg_color",
@@ -298,6 +304,10 @@ class Config:
                 "rec_indicator_color": "rec_indicator_color",
                 "rec_indicator_blink": "rec_indicator_blink",
                 "rec_indicator_blink_rate": "rec_indicator_blink_rate",
+                "can_status_disabled_text": "canbus_status_disabled_text",
+                "can_status_connecting_text": "canbus_status_connecting_text",
+                "can_status_connected_text": "canbus_status_connected_text",
+                "can_status_stale_timeout": "canbus_status_stale_timeout",
             },
             "gps": {
                 "enabled": "gps_enabled",
@@ -406,6 +416,7 @@ class Config:
             "overlay_date_pos": 2,
             "overlay_speed_pos": 2,
             "overlay_rec_indicator_pos": 2,
+            "overlay_can_status_pos": 2,
             "overlay_font_color": 3,
             "overlay_bg_color": 3,
             "overlay_shadow_offset": 2,
