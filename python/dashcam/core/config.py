@@ -132,6 +132,10 @@ class Config:
         self.canbus_overlay_position = (20, 140)
         self.record_canbus_data = False
         self.canbus_log_interval = 1.0
+        self.canbus_use_filters = True
+        self.canbus_no_traffic_warning_seconds = 5.0
+        self.canbus_no_traffic_warning_repeat_seconds = 30.0
+        self.canbus_stats_log_interval = 0.0
 
         # Fuel Consumption Configuration
         self.display_fuel_consumed = True
@@ -333,6 +337,10 @@ class Config:
                 "overlay_position": "canbus_overlay_position",
                 "record_data": "record_canbus_data",
                 "log_interval": "canbus_log_interval",
+                "use_filters": "canbus_use_filters",
+                "no_traffic_warning_seconds": "canbus_no_traffic_warning_seconds",
+                "no_traffic_warning_repeat_seconds": "canbus_no_traffic_warning_repeat_seconds",
+                "stats_log_interval": "canbus_stats_log_interval",
             },
             "fuel": {
                 "display_fuel_consumed": "display_fuel_consumed",

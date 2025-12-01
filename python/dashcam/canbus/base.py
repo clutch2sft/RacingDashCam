@@ -63,6 +63,17 @@ class CANBusInterface:
         self.messages_sent = 0
         self.errors = 0
         self.last_message_time = 0
+        self.start_time = None
+        self.last_no_traffic_log = 0.0
+        self.last_stats_log_time = 0.0
+        self.first_message_logged = False
+        self.no_traffic_warning_seconds = getattr(
+            config, "canbus_no_traffic_warning_seconds", 5.0
+        )
+        self.no_traffic_warning_repeat_seconds = getattr(
+            config, "canbus_no_traffic_warning_repeat_seconds", 30.0
+        )
+        self.stats_log_interval = getattr(config, "canbus_stats_log_interval", 0.0)
         
         # Threading
         self.running = False
@@ -87,6 +98,11 @@ class CANBusInterface:
             # Start receive thread
             self.running = True
             self.stop_event.clear()
+            self.start_time = time.time()
+            self.last_message_time = self.start_time
+            self.last_stats_log_time = self.start_time
+            self.last_no_traffic_log = 0.0
+            self.first_message_logged = False
             self.receive_thread = Thread(target=self._receive_loop, daemon=True)
             self.receive_thread.start()
             
@@ -198,6 +214,9 @@ class CANBusInterface:
         self.logger.info("CAN receive thread started")
         
         while self.running and not self.stop_event.is_set():
+            now = time.time()
+            self._maybe_log_no_traffic(now)
+            self._maybe_log_stats(now)
             try:
                 # Receive message with timeout
                 msg = self.bus.recv(timeout=0.1)
@@ -209,6 +228,14 @@ class CANBusInterface:
                 with self.stats_lock:
                     self.messages_received += 1
                     self.last_message_time = time.time()
+                
+                if not self.first_message_logged:
+                    self.logger.info(
+                        f"First CAN message received on {self.channel} "
+                        f"(ID 0x{msg.arbitration_id:03X})"
+                    )
+                    self.first_message_logged = True
+                    self.last_no_traffic_log = time.time()
                 
                 # Convert to our message format
                 can_msg = CANMessage(
@@ -267,6 +294,56 @@ class CANBusInterface:
                 'last_message_time': self.last_message_time,
                 'handlers_registered': len(self.message_handlers)
             }
+    
+    def _maybe_log_no_traffic(self, now: float):
+        """Emit an info log if the bus has been quiet for too long"""
+        if self.no_traffic_warning_seconds <= 0:
+            return
+        
+        last_msg_time = self.last_message_time or self.start_time or now
+        if (now - last_msg_time) < self.no_traffic_warning_seconds:
+            return
+        
+        if self.last_no_traffic_log and (
+            now - self.last_no_traffic_log
+        ) < max(self.no_traffic_warning_repeat_seconds, 0):
+            return
+        
+        stats = self.get_stats()
+        elapsed = now - last_msg_time
+        self.logger.info(
+            "No CAN traffic on %s for %.1f seconds (rx=%d tx=%d errors=%d)",
+            self.channel,
+            elapsed,
+            stats["messages_received"],
+            stats["messages_sent"],
+            stats["errors"],
+        )
+        self.last_no_traffic_log = now
+    
+    def _maybe_log_stats(self, now: float):
+        """Periodic heartbeat logging of CAN stats (disabled when interval <= 0)"""
+        if self.stats_log_interval <= 0:
+            return
+        
+        if (now - self.last_stats_log_time) < self.stats_log_interval:
+            return
+        
+        stats = self.get_stats()
+        last_msg_age = (
+            now - stats["last_message_time"]
+            if stats["last_message_time"]
+            else float("inf")
+        )
+        self.logger.info(
+            "CAN stats %s: rx=%d tx=%d errors=%d last_msg=%.1fs ago",
+            self.channel,
+            stats["messages_received"],
+            stats["messages_sent"],
+            stats["errors"],
+            last_msg_age,
+        )
+        self.last_stats_log_time = now
     
     def set_filters(self, filters: List[dict]):
         """

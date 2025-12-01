@@ -111,6 +111,7 @@ class CamaroCANBus:
         
         # CAN bus interface (500 kbps for GM HS-CAN)
         self.canbus = CANBusInterface(config, channel=channel, bitrate=500000)
+        self.use_filters = getattr(config, "canbus_use_filters", True)
         
         # Vehicle data
         self.vehicle_data = CamaroVehicleData()
@@ -165,6 +166,10 @@ class CamaroCANBus:
     
     def _setup_filters(self):
         """Set up CAN filters for Camaro messages"""
+        if not self.use_filters:
+            self.logger.info("CAN filters disabled by config; receiving all CAN frames")
+            return
+        
         # Filter for only the messages we care about
         filters = [
             {"can_id": self.MSG_ENGINE_RPM_SPEED, "can_mask": 0x7FF},

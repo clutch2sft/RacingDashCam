@@ -102,6 +102,10 @@ canbus:
   overlay_position: [20, 140]
   record_data: false
   log_interval: 1.0
+  use_filters: true
+  no_traffic_warning_seconds: 5.0
+  no_traffic_warning_repeat_seconds: 30.0
+  stats_log_interval: 0.0
 
 fuel:
   display_fuel_consumed: true
