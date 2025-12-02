@@ -19,6 +19,87 @@ By leveraging the collective knowledge, creativity, and passion of the grassroot
 
 Ready to join the pit crew? Dive into the docs below and let's build something amazing together.
 
+## **📣 Support the Project / GitHub Sponsors**
+
+If this project helps your racing program — whether you're tracking CAN data, building your own dash mirror, or integrating Pi-based telemetry — you can support continued development through GitHub Sponsors:
+
+[![Sponsor](https://img.shields.io/badge/Sponsor-@clutch2sft-ff69b4?logo=github\&logoColor=white)](https://github.com/sponsors/clutch2sft)
+
+Sponsorship helps offset the real costs behind this work:
+
+* Ongoing **Raspberry Pi 5** development, testing, and performance work
+* Camera pipeline tuning (IMX477, IMX519, IMX415, Arducam HQ variations)
+* Reliability improvements for long-duration recording and track-day abuse
+* CAN bus decoding + messaging for multiple vehicle platforms
+* GPS (LC29H) integration and higher-rate logging
+* Storage management, corruption prevention, and safe-shutdown logic
+* End-to-end documentation and examples
+* Hardware experiments for the upcoming custom camera board
+
+Your support directly accelerates features, fixes, and hardware testing.
+
+
+## **🛠️ Project Roadmap**
+
+A high-level view of where RacingDashCam is heading. Timeframes are flexible and based on testing, community input, and sponsorship capacity.
+
+
+### **Phase 1 — Current Focus (Active)**
+
+#### **Stability, Performance & Real-World Usability**
+
+* Improve long-running recording robustness (thermal, I/O errors, camera restarts)
+* Tune dual-camera H.264 pipelines for consistent latency and framerate
+* Improve GPU/CPU balancing on Raspberry Pi 5
+* Harden system boot, shutdown, overlay FS, and corruption protection
+* Reduce rear-view display latency further (HDMI + DRM/KMS handling)
+
+#### **CAN Bus & Vehicle Data Integration**
+
+* Expand support for more common CAN layouts (GM, Toyota, Subaru, BMW, VW)
+* Add configurable CAN message maps + CSV import/export
+* Sync CAN + GPS + video timestamps with tighter accuracy
+* Add detection helpers for common racing signals (RPM cutoff, throttle, braking)
+
+#### **GPS & Timing**
+
+* Improve LC29H integration (10 Hz logging, better discard logic for degraded fixes)
+* Optional lap-timer pipeline (sector splits, best lap, delta overlay)
+
+### **Phase 2 — Expanded Features (Near-Term)**
+
+#### **UI, Overlays & Data Handling**
+
+* On-screen overlays (speed, RPM, engine load, lap timing, GPS vectors)
+* Video + telemetry export tools (CSV, Parquet, motorsport formats)
+* A small “review mode” to quickly inspect last sessions at the track
+* Configuration editor (YAML validation + sample presets)
+
+#### **Automation & Events**
+
+* Auto-start recording on engine start / vehicle motion
+* Auto-stop with configurable cool-down period
+* Error and health logs integrated into the Pi’s display or a mobile app
+
+
+### **Phase 3 — Future Hardware Track**
+
+While this repository is Pi-focused, development is happening in parallel on:
+
+#### **Custom Camera Board (v2 Hardware)**
+
+* RK3588S / Radxa CM5 test carrier
+* High-bandwidth CSI design for multiple cameras
+* Automotive-style power handling & packaging
+* Expansion slot for future modules (analog input, IMU, CAN-FD, etc.)
+
+RacingDashCam will remain Pi-first, but future releases will support both platforms with a unified software stack.
+
+## **💬 Why This Roadmap Exists**
+
+The goal is to keep the project transparent, community-guided, and aligned with real grassroots racing needs. Feedback, issues, test data, and PRs are all welcome — and sponsorship helps push features faster.
+
+
 # Active Dash Mirror - Racing Dashcam System
 
 Raspberry Pi 5-based dashcam system with dual cameras, CAN bus vehicle data, and GPS integration.
