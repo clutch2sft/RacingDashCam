@@ -33,6 +33,7 @@ class DashcamSystem:
         self.display = None
         self.recorder = None
         self.gps = None
+        self.canbus = None
         self.next_gps_retry = 0.0
         self.last_movement_time = None
         
@@ -120,6 +121,33 @@ class DashcamSystem:
 
             if not self.display.start():
                 raise RuntimeError("Failed to start display")
+
+            # Initialize CAN bus (if enabled)
+            if getattr(self.config, "canbus_enabled", False):
+                self.logger.info("Starting CAN bus...")
+                try:
+                    from dashcam.canbus.vehicles.camaro_2013_lfx import create_camaro_canbus, CANChannel
+
+                    channel_map = {"can0": CANChannel.CAN0, "can1": CANChannel.CAN1}
+                    channel = channel_map.get(str(self.config.canbus_channel).lower(), CANChannel.CAN0)
+
+                    if self.config.canbus_vehicle_type != "camaro_2013_lfx":
+                        self.logger.warning(
+                            f"CAN vehicle '{self.config.canbus_vehicle_type}' not supported yet; skipping CAN startup"
+                        )
+                    else:
+                        self.canbus = create_camaro_canbus(self.config, channel=channel)
+                        if not self.canbus.start():
+                            self.logger.warning("CAN bus failed to start; continuing without CAN")
+                            self.canbus = None
+                        elif self.display and getattr(self.config, "display_canbus_data", False):
+                            try:
+                                self.display.set_canbus_vehicle(self.canbus)
+                            except Exception as e:
+                                self.logger.warning(f"Failed to link CAN bus to display: {e}")
+                except Exception as e:
+                    self.logger.error(f"Failed to initialize CAN bus: {e}")
+                    self.canbus = None
             
             # Initialize GPS (if enabled)
             if self.config.gps_enabled:
@@ -194,6 +222,14 @@ class DashcamSystem:
                 self.gps.stop()
             except Exception as e:
                 self.logger.error(f"Error stopping GPS: {e}")
+
+        if self.canbus:
+            self.logger.info("Stopping CAN bus...")
+            try:
+                self.canbus.stop()
+            except Exception as e:
+                self.logger.error(f"Error stopping CAN bus: {e}")
+            self.canbus = None
         
         if self.display:
             self.logger.info("Stopping display...")
@@ -323,6 +359,11 @@ class DashcamSystem:
         self.logger.info(f"  Minimum Free Space: {self.config.keep_minimum_gb}GB")
         self.logger.info(f"  Logs: {self.config.log_dir}")
         self.logger.info(f"  GPS: {'Enabled' if self.config.gps_enabled else 'Disabled'}")
+        self.logger.info(f"  CAN Bus: {'Enabled' if self.config.canbus_enabled else 'Disabled'}")
+        if self.config.canbus_enabled:
+            self.logger.info(f"    Vehicle: {self.config.canbus_vehicle_type}")
+            self.logger.info(f"    Channel: {self.config.canbus_channel} @ {self.config.canbus_bitrate}bps")
+            self.logger.info(f"    Display CAN Data: {self.config.display_canbus_data}")
         
         if self.config.gps_enabled and self.config.speed_recording_enabled:
             self.logger.info(f"  Speed Recording: Start at {self.config.start_recording_speed_mph} mph")
@@ -374,6 +415,16 @@ class DashcamSystem:
                         self.logger.debug("GPS: No fix")
                 except Exception as e:
                     self.logger.debug(f"GPS status error: {e}")
+
+            # CAN bus stats
+            if self.canbus:
+                try:
+                    can_stats = self.canbus.get_stats()
+                    connected = can_stats.get("connected", False)
+                    msg_rx = can_stats.get("messages_received", 0)
+                    self.logger.info(f"CAN: {'OK' if connected else 'WAIT'} RX={msg_rx}")
+                except Exception as e:
+                    self.logger.debug(f"CAN status error: {e}")
             
         except Exception as e:
             self.logger.error(f"Failed to log status: {e}")

@@ -295,6 +295,7 @@ class DrmKmsDisplay:
         self._overlay_last_speed = None
         self._overlay_last_rec_state = None
         self._overlay_last_can_state = None
+        self._overlay_last_can_temps = None
         self._overlay_lock = Lock()
         self._blended_overlay = None
         self.recording = False
@@ -731,6 +732,11 @@ class DrmKmsDisplay:
                     rec_state = (int(time.time() / blink_rate) % 2) == 0
 
             can_status = self._get_canbus_status()
+            can_temps = self._get_canbus_temps_f()
+            temps_key = (
+                int(round(can_temps[0])) if can_temps[0] is not None else None,
+                int(round(can_temps[1])) if can_temps[1] is not None else None,
+            )
 
             needs_update = (
                 self._overlay_rgba is None
@@ -746,12 +752,13 @@ class DrmKmsDisplay:
                 or (fuel_consumed is not None and 
                     (not hasattr(self, '_overlay_last_fuel') or 
                      abs((fuel_consumed - (self._overlay_last_fuel or 0))) > 0.001))
+                or self._overlay_last_can_temps != temps_key
             )
 
             if needs_update:
                 t_or_start = time.time()
                 try:
-                    self._overlay_rgba = self._render_overlay_rgba(rec_state, can_status)
+                    self._overlay_rgba = self._render_overlay_rgba(rec_state, can_status, can_temps)
                     self._blended_overlay = self._precompute_blend_mask(self._overlay_rgba)
                 except Exception:
                     self._overlay_rgba = None
@@ -761,6 +768,7 @@ class DrmKmsDisplay:
                 self._overlay_last_rec_state = rec_state
                 self._overlay_last_fuel = fuel_consumed
                 self._overlay_last_can_state = can_status
+                self._overlay_last_can_temps = temps_key
                 render_ms = (time.time() - t_or_start) * 1000.0
 
             blend_mask = self._blended_overlay
@@ -813,7 +821,8 @@ class DrmKmsDisplay:
         except Exception:
             return frame
 
-    def _render_overlay_rgba(self, rec_state: Optional[bool] = None, can_status: Optional[tuple] = None) -> Optional[np.ndarray]:
+    def _render_overlay_rgba(self, rec_state: Optional[bool] = None, can_status: Optional[tuple] = None,
+                             can_temps: Optional[tuple] = None) -> Optional[np.ndarray]:
         if not self.config.overlay_enabled:
             return None
         img = Image.new("RGBA", (self.width, self.height), (0, 0, 0, 0))
@@ -836,6 +845,14 @@ class DrmKmsDisplay:
                 else:
                     speed_text = f"{cs * 1.60934:.0f} KPH"
                 self._draw_text_with_bg(draw, speed_text, self.config.overlay_speed_pos, self.config.overlay_font_color, self.font)
+
+        if getattr(self.config, "display_canbus_data", False):
+            temps = can_temps if can_temps is not None else self._get_canbus_temps_f()
+            temp_text = self._format_can_temps_text(temps)
+            if temp_text:
+                temp_pos = getattr(self.config, "canbus_overlay_position", (20, 140))
+                temp_font = self.font_small or self.font
+                self._draw_text_with_bg(draw, temp_text, temp_pos, self.config.overlay_font_color, temp_font)
         
         if rec_state is None:
             rec_state = False
@@ -928,6 +945,75 @@ class DrmKmsDisplay:
             return (connected_text, connected_color)
 
         return (connecting_text, connecting_color)
+
+    def _get_canbus_temps_f(self) -> tuple[Optional[float], Optional[float]]:
+        """Fetch coolant and oil temps in Fahrenheit if present on CAN."""
+        coolant_f = None
+        oil_f = None
+
+        with self.canbus_lock:
+            vehicle = self.canbus_vehicle
+
+        vehicle_data = None
+        if vehicle is not None and hasattr(vehicle, "get_vehicle_data"):
+            try:
+                vehicle_data = vehicle.get_vehicle_data()
+            except Exception:
+                vehicle_data = None
+
+        try:
+            if vehicle is not None and hasattr(vehicle, "get_coolant_temp_f"):
+                coolant_f = vehicle.get_coolant_temp_f()
+        except Exception:
+            coolant_f = None
+
+        if coolant_f is None and vehicle_data is not None:
+            try:
+                coolant_f = getattr(vehicle_data, "coolant_temp_f", None)
+                if coolant_f is None:
+                    ct_c = getattr(vehicle_data, "coolant_temp", None)
+                    if ct_c is None:
+                        ct_c = getattr(vehicle_data, "coolant_temp_c", None)
+                    if ct_c is not None:
+                        coolant_f = ct_c * 9.0 / 5.0 + 32.0
+            except Exception:
+                coolant_f = None
+
+        try:
+            if vehicle is not None and hasattr(vehicle, "get_oil_temp_f"):
+                oil_f = vehicle.get_oil_temp_f()
+        except Exception:
+            oil_f = None
+
+        if oil_f is None and vehicle_data is not None:
+            try:
+                oil_f = getattr(vehicle_data, "oil_temp_f", None)
+                if oil_f is None:
+                    ot_c = getattr(vehicle_data, "oil_temp", None)
+                    if ot_c is None:
+                        ot_c = getattr(vehicle_data, "oil_temp_c", None)
+                    if ot_c is not None:
+                        oil_f = ot_c * 9.0 / 5.0 + 32.0
+            except Exception:
+                oil_f = None
+
+        return (coolant_f, oil_f)
+
+    def _format_can_temps_text(self, can_temps: Optional[tuple]) -> Optional[str]:
+        """Build overlay text using C/O markers in Fahrenheit."""
+        if not can_temps or len(can_temps) != 2:
+            return None
+
+        coolant_f, oil_f = can_temps
+        parts = []
+        if coolant_f is not None:
+            parts.append(f"C {coolant_f:.0f}F")
+        if oil_f is not None:
+            parts.append(f"O {oil_f:.0f}F")
+
+        if not parts:
+            return None
+        return "  ".join(parts)
 
     def _blend_overlay(self, frame: np.ndarray, overlay_rgba: np.ndarray) -> np.ndarray:
         if overlay_rgba is None:
