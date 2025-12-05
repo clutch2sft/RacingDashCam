@@ -1,0 +1,17 @@
+[Unit]
+Description=RacingDashCam Power Loss Monitor
+After=multi-user.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/dashcam/PowerMonitor
+ExecStart=/opt/dashcam/venv/bin/python /opt/dashcam/PowerMonitor/power_monitor.py
+Restart=on-failure
+RestartSec=2
+Environment=POWER_MONITOR_GPIO=25
+# Run as root to access GPIO and issue shutdown
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

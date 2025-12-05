@@ -41,6 +41,7 @@ VIDEO_DIR="$VIDEO_BASE/videos"
 LOG_DIR="$VIDEO_BASE/logs"
 CONFIG_DIR="/etc/dashcam"
 VENV_DIR="$INSTALL_BASE/venv"
+POWER_MONITOR_DIR="$INSTALL_BASE/PowerMonitor"
 WIFI_COUNTRY="${WIFI_COUNTRY:-US}"
 AP_SSID="${AP_SSID:-dashcamxfer}"
 AP_PSK="${AP_PSK:-changeme}"
@@ -218,6 +219,7 @@ apt install -y \
     python3-kms++ \
     python3-opencv \
     python3-numpy \
+    python3-rpi.gpio \
     v4l-utils \
     ffmpeg \
     gstreamer1.0-tools \
@@ -378,6 +380,7 @@ echo -e "${GREEN}Step 6: Creating directory structure...${NC}"
 
 # Create application directories
 mkdir -p "$INSTALL_BASE"
+mkdir -p "$POWER_MONITOR_DIR"
 mkdir -p "$CONFIG_DIR"
 
 # Create data directories
@@ -725,7 +728,37 @@ echo -e "${GREEN}✓ CAN bus configured${NC}"
 echo "  CAN0 and CAN1 will be configured at boot (500 kbps)"
 
 echo ""
-echo -e "${GREEN}Step 13: Creating systemd service...${NC}"
+echo -e "${GREEN}Step 13: Installing power loss monitor service...${NC}"
+
+# Install the power monitor script under /opt/dashcam and enable its service
+install -m 755 "$REPO_DIR/python/scripts/power_monitor.py" "$POWER_MONITOR_DIR/power_monitor.py"
+
+cat > /etc/systemd/system/power-monitor.service << EOF
+[Unit]
+Description=RacingDashCam Power Loss Monitor
+After=multi-user.target
+
+[Service]
+Type=simple
+WorkingDirectory=$POWER_MONITOR_DIR
+ExecStart=$VENV_DIR/bin/python $POWER_MONITOR_DIR/power_monitor.py
+Restart=on-failure
+RestartSec=2
+Environment=POWER_MONITOR_GPIO=25
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now power-monitor.service
+
+echo -e "${GREEN}✓ Power monitor installed and enabled (GPIO 25, active-low trigger)${NC}"
+
+echo ""
+echo -e "${GREEN}Step 14: Creating systemd service...${NC}"
 
 cat > /etc/systemd/system/dashcam.service << EOF
 [Unit]
@@ -758,7 +791,7 @@ systemctl enable dashcam.service
 echo -e "${GREEN}✓ Systemd service created and enabled${NC}"
 
 echo ""
-echo -e "${GREEN}Step 14: Disabling screen blanking...${NC}"
+echo -e "${GREEN}Step 15: Disabling screen blanking...${NC}"
 
 # Add to rc.local. Use tty0 with TERM=linux so setterm does not complain
 # when no controlling terminal is present (e.g., when service stops).
@@ -781,7 +814,7 @@ fi
 echo -e "${GREEN}✓ Screen blanking disabled${NC}"
 
 echo ""
-echo -e "${GREEN}Step 15: Configuring framebuffer permissions...${NC}"
+echo -e "${GREEN}Step 16: Configuring framebuffer permissions...${NC}"
 
 # Add user to video group for framebuffer access
 usermod -a -G video $SUDO_USER
@@ -804,7 +837,7 @@ EOF
 echo -e "${GREEN}✓ Framebuffer udev rule created${NC}"
 
 echo ""
-echo -e "${GREEN}Step 16: Setting boot order for NVMe...${NC}"
+echo -e "${GREEN}Step 17: Setting boot order for NVMe...${NC}"
 
 # Set boot order to try NVMe first
 BOOT_CONFIG="/tmp/bootloader_config.txt"
@@ -821,7 +854,7 @@ fi
 rm -f "$BOOT_CONFIG"
 
 echo ""
-echo -e "${GREEN}Step 17: Creating convenience scripts...${NC}"
+echo -e "${GREEN}Step 18: Creating convenience scripts...${NC}"
 
 # Camera test script
 cat > /usr/local/bin/dashcam-test-cameras << 'TESTEOF'
